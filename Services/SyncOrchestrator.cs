@@ -16,10 +16,18 @@ public class SyncOrchestrator
     private readonly CertificateService _certificateService;
     private readonly InstanceIdentifier _instanceIdentifier;
     private readonly DockerClient _dockerClient;
+    private readonly SettingsStore _settings;
+    private readonly IconResolver _iconResolver;
+    private readonly KomodoClient _komodoClient;
     private readonly NpmMirrorSyncService? _mirrorSyncService;
-    private readonly string _npmUrl;
     private readonly DateTime _startedAt = DateTime.UtcNow;
     private string? _instanceId;
+
+    private string NpmUrl => UrlNormalizer.Normalize(
+        _settings.Get("NPM_URL")
+        ?? throw new ArgumentException("NPM_URL is required"));
+
+    private bool AdoptExisting => _settings.GetBool("NPM_ADOPT_EXISTING");
 
     // Key format: "containerId:proxyIndex" -> NPM proxy host ID
     private readonly ConcurrentDictionary<string, int> _containerProxyMap = new();
@@ -42,7 +50,9 @@ public class SyncOrchestrator
         CertificateService certificateService,
         InstanceIdentifier instanceIdentifier,
         DockerClient dockerClient,
-        IConfiguration configuration,
+        SettingsStore settings,
+        IconResolver iconResolver,
+        KomodoClient komodoClient,
         IServiceProvider serviceProvider)
     {
         _logger = logger;
@@ -52,13 +62,15 @@ public class SyncOrchestrator
         _certificateService = certificateService;
         _instanceIdentifier = instanceIdentifier;
         _dockerClient = dockerClient;
+        _settings = settings;
+        _iconResolver = iconResolver;
+        _komodoClient = komodoClient;
 
         _mirrorSyncService = serviceProvider.GetService(typeof(NpmMirrorSyncService)) as NpmMirrorSyncService;
 
-        var rawUrl = configuration["NPM_URL"] ?? throw new ArgumentException("NPM_URL is required");
-        _npmUrl = UrlNormalizer.Normalize(rawUrl);
-
-        _logger.LogInformation("Using normalized NPM URL: {NpmUrl}", _npmUrl);
+        _logger.LogInformation("Using normalized NPM URL: {NpmUrl}", NpmUrl);
+        if (AdoptExisting)
+            _logger.LogInformation("NPM_ADOPT_EXISTING is enabled — unmanaged overlapping proxy hosts will be claimed");
     }
 
     public async Task RestoreStateFromNpm(DockerClient dockerClient, CancellationToken cancellationToken)
@@ -137,8 +149,9 @@ public class SyncOrchestrator
                 }
             }
 
-            _logger.LogInformation("State restored: {ProxyCount} proxy(s), {StreamCount} stream(s), {HashCount} label hash(es)",
-                managedProxies.Count, managedStreams.Count, _containerLabelHashes.Count);
+            _logger.LogInformation(
+                "State restored: {ProxyCount}/{TotalProxies} managed proxy(s), {StreamCount} stream(s), {HashCount} label hash(es)",
+                managedProxies.Count, allProxies.Count, managedStreams.Count, _containerLabelHashes.Count);
         }
         catch (Exception ex)
         {
@@ -306,6 +319,29 @@ public class SyncOrchestrator
                 var uiDisabled = _uiDisabledProxies.ContainsKey(proxyKey) ||
                                  (npmHost != null && NginxProxyManagerClient.IsUiDisabled(npmHost));
 
+                var routeOverride = _settings.GetRouteOverride(containerId, index);
+                if (routeOverride != null)
+                    ApplyRouteOverride(containerId, index, config);
+
+                ApplyDefaultAuthRequest(config);
+
+                var icon = await _iconResolver.ResolveAsync(
+                    routeOverride?.Icon,
+                    config.Homepage?.Icon,
+                    config.Homepage?.Name,
+                    containerName,
+                    cancellationToken);
+
+                KomodoMatch? komodo = null;
+                try
+                {
+                    komodo = await _komodoClient.FindResourceForContainerAsync(containerName, cancellationToken);
+                }
+                catch
+                {
+                    // ignored
+                }
+
                 routes.Add(new RouteInfo
                 {
                     ContainerId = containerId,
@@ -313,7 +349,7 @@ public class SyncOrchestrator
                     Index = index,
                     Name = config.Homepage?.Name ?? containerName,
                     Description = config.Homepage?.Description,
-                    Icon = config.Homepage?.Icon,
+                    Icon = icon,
                     Category = config.Homepage?.Category
                                ?? (config.LabelSource == ProxyLabelSource.GoDoxy ? "Docker" : "NPM"),
                     Domains = config.DomainNames,
@@ -324,6 +360,21 @@ public class SyncOrchestrator
                     NpmHostId = npmHost?.Id,
                     Enabled = npmHost == null ? null : !uiDisabled && npmHost.Enabled == 1,
                     LabelSource = config.LabelSource.ToString().ToLowerInvariant(),
+                    SslForced = config.SslForced,
+                    Http2Support = config.Http2Support,
+                    HstsEnabled = config.HstsEnabled,
+                    HstsSubdomains = config.HstsSubdomains,
+                    AllowWebsocketUpgrade = config.AllowWebsocketUpgrade,
+                    CachingEnabled = config.CachingEnabled,
+                    BlockExploits = config.BlockExploits,
+                    CertificateId = config.CertificateId,
+                    AuthRequest = config.AuthRequest,
+                    AuthRequestUpstream = config.AuthRequestUpstream,
+                    AuthExempt = routeOverride?.AuthExempt,
+                    HasUiOverride = routeOverride != null,
+                    KomodoUrl = komodo?.Url,
+                    KomodoResourceType = komodo?.ResourceType,
+                    KomodoResourceName = komodo?.ResourceName,
                 });
             }
         }
@@ -412,6 +463,9 @@ public class SyncOrchestrator
 
     private async Task ProcessProxyConfig(string containerId, string containerName, int index, ProxyConfiguration config, CancellationToken cancellationToken)
     {
+        ApplyRouteOverride(containerId, index, config);
+        ApplyDefaultAuthRequest(config);
+
         if (string.IsNullOrEmpty(config.ForwardHost))
         {
             config.ForwardHost = await _networkService.InferForwardHost(
@@ -623,7 +677,7 @@ public class SyncOrchestrator
 
         try
         {
-            var request = _labelParser.ToStreamRequest(config, containerId, _instanceId!, _npmUrl);
+            var request = _labelParser.ToStreamRequest(config, containerId, _instanceId!, NpmUrl);
             var stream = await _npmClient.CreateStreamAsync(request, cancellationToken);
 
             _containerStreamMap.AddOrUpdate(streamKey, stream.Id, (_, _) => stream.Id);
@@ -659,55 +713,221 @@ public class SyncOrchestrator
         {
             if (!NginxProxyManagerClient.IsAutomationManaged(existingHost, _instanceId!))
             {
-                _logger.LogError("⚠️ CONFLICT: Found existing proxy host {HostId} with domains [{ExistingDomains}] that overlaps with requested domains [{RequestedDomains}]",
-                    existingHost.Id,
-                    string.Join(", ", existingHost.DomainNames ?? new List<string>()),
-                    string.Join(", ", config.DomainNames));
-                _logger.LogError("⚠️ This proxy is NOT managed by this automation instance (ID: {InstanceId})", _instanceId);
+                if (!AdoptExisting)
+                {
+                    _logger.LogError(
+                        "⚠️ CONFLICT: Found existing proxy host {HostId} with domains [{ExistingDomains}] that overlaps with requested domains [{RequestedDomains}]",
+                        existingHost.Id,
+                        string.Join(", ", existingHost.DomainNames ?? new List<string>()),
+                        string.Join(", ", config.DomainNames));
+                    _logger.LogError(
+                        "⚠️ This proxy is NOT managed by this automation instance (ID: {InstanceId}). Set NPM_ADOPT_EXISTING=true to claim it.",
+                        _instanceId);
+                    return;
+                }
+
+                _logger.LogWarning(
+                    "Adopting unmanaged proxy host {HostId} for domains [{Domains}] (NPM_ADOPT_EXISTING)",
+                    existingHost.Id, string.Join(", ", config.DomainNames));
+                await UpdateExistingProxyHost(proxyKey, existingHost.Id, containerId, config, uiDisabled, cancellationToken);
                 return;
             }
 
-            // Preserve UI disabled from existing host meta before delete
+            // Preserve UI disabled from existing host meta before update
             if (NginxProxyManagerClient.IsUiDisabled(existingHost))
             {
                 uiDisabled = true;
                 _uiDisabledProxies[proxyKey] = true;
             }
 
-            _logger.LogInformation("Found existing automation-managed proxy host {HostId}. Deleting and recreating...", existingHost.Id);
-            await _npmClient.DeleteProxyHostAsync(existingHost.Id, cancellationToken);
+            _logger.LogInformation("Found existing automation-managed proxy host {HostId}. Updating in place...", existingHost.Id);
+            await UpdateExistingProxyHost(proxyKey, existingHost.Id, containerId, config, uiDisabled, cancellationToken);
+            return;
         }
 
         try
         {
-            var request = _labelParser.ToProxyHostRequest(config, containerId, _instanceId!, _npmUrl, uiDisabled);
+            var request = _labelParser.ToProxyHostRequest(config, containerId, _instanceId!, NpmUrl, uiDisabled);
             var newHost = await _npmClient.CreateProxyHostAsync(request, cancellationToken);
-
-            _containerProxyMap.AddOrUpdate(proxyKey, newHost.Id, (_, _) => newHost.Id);
-
-            var options = new List<string>();
-            if (config.SslForced) options.Add("ssl");
-            if (config.AllowWebsocketUpgrade) options.Add("websockets");
-            if (config.Http2Support) options.Add("http2");
-            if (config.HstsEnabled) options.Add("hsts");
-            if (config.CachingEnabled) options.Add("cache");
-            if (config.BlockExploits) options.Add("block_exploits");
-            if (uiDisabled) options.Add("disabled");
-
-            _logger.LogInformation("✅ Created proxy host {{id={HostId}, domains=[{Domains}], forward={Scheme}://{Host}:{Port}, options={Options}}}",
-                newHost.Id,
-                string.Join(",", config.DomainNames),
-                config.ForwardScheme,
-                config.ForwardHost,
-                config.ForwardPort,
-                options.Count > 0 ? string.Join("+", options) : "none");
+            RecordCreatedProxy(proxyKey, newHost.Id, config, uiDisabled);
         }
-        catch (HttpRequestException ex) when (ex.Message.Contains("already in use") || ex.StatusCode == System.Net.HttpStatusCode.BadRequest)
+        catch (HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.BadRequest)
         {
-            _logger.LogError("❌ Failed to create proxy host for container {ContainerId} proxy {Index}: One or more domains [{Domains}] are already in use in NPM",
-                containerId, index, string.Join(", ", config.DomainNames));
-            throw;
+            var isDomainConflict = ex.Message.Contains("already in use", StringComparison.OrdinalIgnoreCase);
+            _logger.LogError(ex,
+                "❌ Failed to create proxy host for container {ContainerId} proxy {Index}: {Message}",
+                containerId, index, ex.Message);
+
+            if (!isDomainConflict)
+                throw;
+
+            // Domain taken — try to resolve via fresh lookup (race / missed list deserialize)
+            existingHost = await _npmClient.GetProxyHostByDomainsAsync(config.DomainNames, cancellationToken);
+            if (existingHost == null)
+            {
+                _logger.LogError(
+                    "Domain conflict reported by NPM but no overlapping proxy host was found — domain may belong to a redirection/dead host");
+                return;
+            }
+
+            if (!NginxProxyManagerClient.IsAutomationManaged(existingHost, _instanceId!) && !AdoptExisting)
+            {
+                _logger.LogError(
+                    "⚠️ CONFLICT: proxy host {HostId} owns overlapping domains and is not managed by instance {InstanceId}. Set NPM_ADOPT_EXISTING=true to claim it.",
+                    existingHost.Id, _instanceId);
+                return;
+            }
+
+            if (NginxProxyManagerClient.IsUiDisabled(existingHost))
+            {
+                uiDisabled = true;
+                _uiDisabledProxies[proxyKey] = true;
+            }
+
+            _logger.LogInformation("Recovering from domain conflict by updating proxy host {HostId}", existingHost.Id);
+            await UpdateExistingProxyHost(proxyKey, existingHost.Id, containerId, config, uiDisabled, cancellationToken);
         }
+    }
+
+    private async Task UpdateExistingProxyHost(
+        string proxyKey,
+        int hostId,
+        string containerId,
+        ProxyConfiguration config,
+        bool uiDisabled,
+        CancellationToken cancellationToken)
+    {
+        var request = _labelParser.ToProxyHostRequest(config, containerId, _instanceId!, NpmUrl, uiDisabled);
+        var updated = await _npmClient.UpdateProxyHostAsync(hostId, request, cancellationToken);
+        RecordCreatedProxy(proxyKey, updated.Id, config, uiDisabled);
+    }
+
+    private void RecordCreatedProxy(string proxyKey, int hostId, ProxyConfiguration config, bool uiDisabled)
+    {
+        _containerProxyMap.AddOrUpdate(proxyKey, hostId, (_, _) => hostId);
+
+        var options = new List<string>();
+        if (config.SslForced) options.Add("ssl");
+        if (config.AllowWebsocketUpgrade) options.Add("websockets");
+        if (config.Http2Support) options.Add("http2");
+        if (config.HstsEnabled) options.Add("hsts");
+        if (config.CachingEnabled) options.Add("cache");
+        if (config.BlockExploits) options.Add("block_exploits");
+        if (uiDisabled) options.Add("disabled");
+
+        _logger.LogInformation(
+            "✅ Synced proxy host {{id={HostId}, domains=[{Domains}], forward={Scheme}://{Host}:{Port}, options={Options}}}",
+            hostId,
+            string.Join(",", config.DomainNames),
+            config.ForwardScheme,
+            config.ForwardHost,
+            config.ForwardPort,
+            options.Count > 0 ? string.Join("+", options) : "none");
+    }
+
+    public async Task UpdateRouteOverrideAsync(string containerId, int index, RouteOverride patch, CancellationToken cancellationToken)
+    {
+        var existing = _settings.GetRouteOverride(containerId, index) ?? new RouteOverride();
+        MergeOverride(existing, patch);
+        _settings.UpsertRouteOverride(containerId, index, existing);
+
+        // Force re-sync so NPM picks up changes
+        _containerLabelHashes.TryRemove(containerId, out _);
+        await SyncNowAsync(containerId, cancellationToken);
+    }
+
+    public async Task ClearRouteOverrideAsync(string containerId, int index, CancellationToken cancellationToken)
+    {
+        _settings.DeleteRouteOverride(containerId, index);
+        _containerLabelHashes.TryRemove(containerId, out _);
+        await SyncNowAsync(containerId, cancellationToken);
+    }
+
+    private void ApplyRouteOverride(string containerId, int index, ProxyConfiguration config)
+    {
+        var ov = _settings.GetRouteOverride(containerId, index);
+        if (ov == null)
+            return;
+
+        if (!string.IsNullOrWhiteSpace(ov.ForwardHost))
+            config.ForwardHost = ov.ForwardHost;
+        if (ov.ForwardPort.HasValue)
+            config.ForwardPort = ov.ForwardPort;
+        if (!string.IsNullOrWhiteSpace(ov.ForwardScheme))
+            config.ForwardScheme = ov.ForwardScheme;
+        if (ov.SslForced.HasValue)
+            config.SslForced = ov.SslForced.Value;
+        if (ov.Http2Support.HasValue)
+            config.Http2Support = ov.Http2Support.Value;
+        if (ov.HstsEnabled.HasValue)
+            config.HstsEnabled = ov.HstsEnabled.Value;
+        if (ov.HstsSubdomains.HasValue)
+            config.HstsSubdomains = ov.HstsSubdomains.Value;
+        if (ov.AllowWebsocketUpgrade.HasValue)
+            config.AllowWebsocketUpgrade = ov.AllowWebsocketUpgrade.Value;
+        if (ov.CachingEnabled.HasValue)
+            config.CachingEnabled = ov.CachingEnabled.Value;
+        if (ov.BlockExploits.HasValue)
+            config.BlockExploits = ov.BlockExploits.Value;
+        if (ov.CertificateId.HasValue)
+            config.CertificateId = ov.CertificateId;
+        if (ov.AdvancedConfig != null)
+            config.AdvancedConfig = ov.AdvancedConfig;
+
+        if (ov.AuthExempt == true)
+        {
+            config.AuthRequest = "none";
+            config.AuthRequestUpstream = string.Empty;
+        }
+        else
+        {
+            if (!string.IsNullOrWhiteSpace(ov.AuthRequest))
+                config.AuthRequest = ov.AuthRequest;
+            if (ov.AuthRequestUpstream != null)
+                config.AuthRequestUpstream = ov.AuthRequestUpstream;
+        }
+
+        if (!string.IsNullOrWhiteSpace(ov.Icon))
+        {
+            config.Homepage ??= new HomepageInfo();
+            config.Homepage.Icon = ov.Icon;
+        }
+    }
+
+    private void ApplyDefaultAuthRequest(ProxyConfiguration config)
+    {
+        if (!string.IsNullOrWhiteSpace(config.AuthRequest))
+            return;
+
+        var defaultAuth = _settings.Get("AUTH_REQUEST_DEFAULT");
+        if (string.IsNullOrWhiteSpace(defaultAuth) || defaultAuth.Equals("none", StringComparison.OrdinalIgnoreCase))
+        {
+            config.AuthRequest = "none";
+            return;
+        }
+
+        config.AuthRequest = defaultAuth;
+        config.AuthRequestUpstream = _settings.Get("AUTH_REQUEST_UPSTREAM") ?? string.Empty;
+    }
+
+    private static void MergeOverride(RouteOverride target, RouteOverride patch)
+    {
+        if (patch.ForwardHost != null) target.ForwardHost = patch.ForwardHost;
+        if (patch.ForwardPort.HasValue) target.ForwardPort = patch.ForwardPort;
+        if (patch.ForwardScheme != null) target.ForwardScheme = patch.ForwardScheme;
+        if (patch.SslForced.HasValue) target.SslForced = patch.SslForced;
+        if (patch.Http2Support.HasValue) target.Http2Support = patch.Http2Support;
+        if (patch.HstsEnabled.HasValue) target.HstsEnabled = patch.HstsEnabled;
+        if (patch.HstsSubdomains.HasValue) target.HstsSubdomains = patch.HstsSubdomains;
+        if (patch.AllowWebsocketUpgrade.HasValue) target.AllowWebsocketUpgrade = patch.AllowWebsocketUpgrade;
+        if (patch.CachingEnabled.HasValue) target.CachingEnabled = patch.CachingEnabled;
+        if (patch.BlockExploits.HasValue) target.BlockExploits = patch.BlockExploits;
+        if (patch.CertificateId.HasValue) target.CertificateId = patch.CertificateId;
+        if (patch.AuthRequest != null) target.AuthRequest = patch.AuthRequest;
+        if (patch.AuthRequestUpstream != null) target.AuthRequestUpstream = patch.AuthRequestUpstream;
+        if (patch.AuthExempt.HasValue) target.AuthExempt = patch.AuthExempt;
+        if (patch.Icon != null) target.Icon = patch.Icon;
+        if (patch.AdvancedConfig != null) target.AdvancedConfig = patch.AdvancedConfig;
     }
 
     private async Task EnsureInstanceIdAsync(CancellationToken cancellationToken)
@@ -765,6 +985,21 @@ public class RouteInfo
     public int? NpmHostId { get; set; }
     public bool? Enabled { get; set; }
     public string LabelSource { get; set; } = "npm";
+    public bool? SslForced { get; set; }
+    public bool? Http2Support { get; set; }
+    public bool? HstsEnabled { get; set; }
+    public bool? HstsSubdomains { get; set; }
+    public bool? AllowWebsocketUpgrade { get; set; }
+    public bool? CachingEnabled { get; set; }
+    public bool? BlockExploits { get; set; }
+    public int? CertificateId { get; set; }
+    public string? AuthRequest { get; set; }
+    public string? AuthRequestUpstream { get; set; }
+    public bool? AuthExempt { get; set; }
+    public bool HasUiOverride { get; set; }
+    public string? KomodoUrl { get; set; }
+    public string? KomodoResourceType { get; set; }
+    public string? KomodoResourceName { get; set; }
 }
 
 public class DashboardStats

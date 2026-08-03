@@ -15,7 +15,9 @@ services:
       - WEB_UI_PORT=8080
       - NPM_TLS_SKIP_VERIFY=true
       - SYNC_INSTANCE_ID=docker-compose-test
+      - SQLITE_PATH=/data/npm-docker-sync.db
     volumes:
+      - npm-docker-sync-data:/data
       # Podman Desktop on macOS: /var/run/docker.sock is a host symlink and fails inside the
       # container with "Permission denied". Point DOCKER_SOCKET at the real machine socket, e.g.
       # DOCKER_SOCKET=$HOME/.local/share/containers/podman/machine/podman.sock
@@ -111,3 +113,4 @@ networks:
 
 volumes:
   npmplus_data:
+  npm-docker-sync-data:

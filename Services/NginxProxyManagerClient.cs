@@ -163,50 +163,100 @@ public class NginxProxyManagerClient
         await EnsureAuthenticated(cancellationToken);
 
         var response = await _httpClient.GetAsync("/api/nginx/proxy-hosts", cancellationToken);
-        response.EnsureSuccessStatusCode();
+        var body = await response.Content.ReadAsStringAsync(cancellationToken);
 
-        var hosts = await response.Content.ReadFromJsonAsync<List<ProxyHost>>(cancellationToken);
-        return hosts ?? new List<ProxyHost>();
+        if (!response.IsSuccessStatusCode)
+        {
+            _logger.LogError("Failed to list proxy hosts: {Status} {Body}",
+                (int)response.StatusCode, Truncate(body, 500));
+            response.EnsureSuccessStatusCode();
+        }
+
+        var hosts = DeserializeProxyHostList(body);
+        _logger.LogInformation("Listed {Count} proxy host(s) from NPM", hosts.Count);
+        if (hosts.Count > 0 && _logger.IsEnabled(LogLevel.Debug))
+        {
+            var sample = hosts.Take(5).Select(h =>
+                $"#{h.Id}:[{string.Join(",", h.DomainNames ?? new List<string>())}]");
+            _logger.LogDebug("Proxy host sample: {Sample}", string.Join("; ", sample));
+        }
+
+        return hosts;
+    }
+
+    private List<ProxyHost> DeserializeProxyHostList(string body)
+    {
+        if (string.IsNullOrWhiteSpace(body))
+            return new List<ProxyHost>();
+
+        var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+
+        try
+        {
+            // Classic NPM / NPMplus: raw array
+            if (body.TrimStart().StartsWith('['))
+            {
+                return JsonSerializer.Deserialize<List<ProxyHost>>(body, options) ?? new List<ProxyHost>();
+            }
+
+            // Some forks wrap as { "data": [ ... ] }
+            using var doc = JsonDocument.Parse(body);
+            if (doc.RootElement.ValueKind == JsonValueKind.Object &&
+                doc.RootElement.TryGetProperty("data", out var data) &&
+                data.ValueKind == JsonValueKind.Array)
+            {
+                return JsonSerializer.Deserialize<List<ProxyHost>>(data.GetRawText(), options)
+                       ?? new List<ProxyHost>();
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to deserialize proxy host list. Body: {Body}", Truncate(body, 500));
+            throw;
+        }
+
+        _logger.LogWarning("Unexpected proxy-hosts response shape. Body: {Body}", Truncate(body, 300));
+        return new List<ProxyHost>();
     }
 
     public async Task<ProxyHost?> GetProxyHostByDomainAsync(string domain, CancellationToken cancellationToken)
     {
         var hosts = await GetProxyHostsAsync(cancellationToken);
-        
-        // Try exact match first (case-insensitive)
-        var exactMatch = hosts.FirstOrDefault(h => 
+
+        var exactMatch = hosts.FirstOrDefault(h =>
             h.DomainNames?.Any(d => string.Equals(d, domain, StringComparison.OrdinalIgnoreCase)) == true);
-        
+
         if (exactMatch != null)
         {
             _logger.LogDebug("Found exact match for domain {Domain} in proxy host {HostId}", domain, exactMatch.Id);
             return exactMatch;
         }
-        
+
         _logger.LogDebug("No proxy host found for domain {Domain} (searched {Count} hosts)", domain, hosts.Count);
         return null;
     }
-    
+
     public async Task<ProxyHost?> GetProxyHostByDomainsAsync(IEnumerable<string> domains, CancellationToken cancellationToken)
     {
         var hosts = await GetProxyHostsAsync(cancellationToken);
         var domainList = domains.ToList();
 
-        // Find any host that has ANY of the specified domains (case-insensitive)
         var matchingHost = hosts.FirstOrDefault(h =>
             h.DomainNames?.Any(hostDomain =>
                 domainList.Any(d => string.Equals(d, hostDomain, StringComparison.OrdinalIgnoreCase))) == true);
 
         if (matchingHost != null)
         {
-            _logger.LogDebug("Found proxy host {HostId} with overlapping domains: host has [{HostDomains}], searching for [{SearchDomains}]",
+            _logger.LogInformation(
+                "Found proxy host {HostId} overlapping domains: host=[{HostDomains}] search=[{SearchDomains}]",
                 matchingHost.Id,
                 string.Join(", ", matchingHost.DomainNames ?? new List<string>()),
                 string.Join(", ", domainList));
         }
         else
         {
-            _logger.LogDebug("No proxy host found for any of the domains: [{Domains}] (searched {Count} hosts)",
+            _logger.LogInformation(
+                "No proxy host found for domains [{Domains}] (searched {Count} hosts)",
                 string.Join(", ", domainList), hosts.Count);
         }
 
@@ -239,9 +289,20 @@ public class NginxProxyManagerClient
         _logger.LogInformation("Creating proxy host for domains: {Domains}", string.Join(", ", request.DomainNames));
 
         var response = await _httpClient.PostAsJsonAsync("/api/nginx/proxy-hosts", request, cancellationToken);
-        response.EnsureSuccessStatusCode();
+        var body = await response.Content.ReadAsStringAsync(cancellationToken);
 
-        var result = await response.Content.ReadFromJsonAsync<ProxyHost>(cancellationToken);
+        if (!response.IsSuccessStatusCode)
+        {
+            throw new HttpRequestException(
+                $"Failed to create proxy host ({(int)response.StatusCode} {response.ReasonPhrase}): {Truncate(body, 500)}",
+                null,
+                response.StatusCode);
+        }
+
+        var result = JsonSerializer.Deserialize<ProxyHost>(body, new JsonSerializerOptions
+        {
+            PropertyNameCaseInsensitive = true
+        });
         return result ?? throw new Exception("Failed to create proxy host");
     }
 
@@ -253,9 +314,20 @@ public class NginxProxyManagerClient
             hostId, string.Join(", ", request.DomainNames));
 
         var response = await _httpClient.PutAsJsonAsync($"/api/nginx/proxy-hosts/{hostId}", request, cancellationToken);
-        response.EnsureSuccessStatusCode();
+        var body = await response.Content.ReadAsStringAsync(cancellationToken);
 
-        var result = await response.Content.ReadFromJsonAsync<ProxyHost>(cancellationToken);
+        if (!response.IsSuccessStatusCode)
+        {
+            throw new HttpRequestException(
+                $"Failed to update proxy host {hostId} ({(int)response.StatusCode} {response.ReasonPhrase}): {Truncate(body, 500)}",
+                null,
+                response.StatusCode);
+        }
+
+        var result = JsonSerializer.Deserialize<ProxyHost>(body, new JsonSerializerOptions
+        {
+            PropertyNameCaseInsensitive = true
+        });
         return result ?? throw new Exception("Failed to update proxy host");
     }
 
@@ -279,6 +351,10 @@ public class NginxProxyManagerClient
             : new Dictionary<string, object>();
         meta["ui_disabled"] = !enabled;
 
+        var accessListIds = existing.NpmplusAccessListIds ?? new List<int>();
+        if (accessListIds.Count == 0 && existing.AccessListId is > 0)
+            accessListIds = new List<int> { existing.AccessListId.Value };
+
         var request = new ProxyHostRequest
         {
             DomainNames = existing.DomainNames ?? new List<string>(),
@@ -286,16 +362,21 @@ public class NginxProxyManagerClient
             ForwardHost = existing.ForwardHost ?? string.Empty,
             ForwardPort = existing.ForwardPort,
             AccessListId = existing.AccessListId ?? 0,
+            NpmplusAccessListIds = accessListIds,
+            NpmplusAccessListType = existing.NpmplusAccessListType
+                ?? (accessListIds.Count > 0 ? "custom" : "public"),
             CertificateId = existing.CertificateId ?? 0,
-            SslForced = existing.SslForced,
-            CachingEnabled = existing.CachingEnabled,
-            BlockExploits = existing.BlockExploits,
+            SslForced = existing.SslForced != 0,
+            CachingEnabled = existing.CachingEnabled != 0,
+            BlockExploits = existing.BlockExploits != 0,
             AdvancedConfig = existing.AdvancedConfig ?? string.Empty,
-            AllowWebsocketUpgrade = existing.AllowWebsocketUpgrade,
-            Http2Support = existing.Http2Support,
-            HstsEnabled = existing.HstsEnabled,
-            HstsSubdomains = existing.HstsSubdomains,
-            Enabled = enabled ? 1 : 0,
+            AllowWebsocketUpgrade = existing.AllowWebsocketUpgrade != 0,
+            Http2Support = existing.Http2Support != 0,
+            HstsEnabled = existing.HstsEnabled != 0,
+            HstsSubdomains = existing.HstsSubdomains != 0,
+            Enabled = enabled,
+            NpmplusAuthRequest = existing.NpmplusAuthRequest ?? "none",
+            NpmplusAuthRequestUpstream = existing.NpmplusAuthRequestUpstream ?? string.Empty,
             Meta = meta,
         };
 
@@ -530,6 +611,12 @@ public class ProxyHost
     [JsonPropertyName("access_list_id")]
     public int? AccessListId { get; set; }
 
+    [JsonPropertyName("npmplus_access_list_ids")]
+    public List<int>? NpmplusAccessListIds { get; set; }
+
+    [JsonPropertyName("npmplus_access_list_type")]
+    public string? NpmplusAccessListType { get; set; }
+
     [JsonPropertyName("certificate_id")]
     public int? CertificateId { get; set; }
 
@@ -570,6 +657,12 @@ public class ProxyHost
 
     [JsonPropertyName("meta")]
     public Dictionary<string, object>? Meta { get; set; }
+
+    [JsonPropertyName("npmplus_auth_request")]
+    public string? NpmplusAuthRequest { get; set; }
+
+    [JsonPropertyName("npmplus_auth_request_upstream")]
+    public string? NpmplusAuthRequestUpstream { get; set; }
 }
 
 public class ProxyHostRequest
@@ -586,20 +679,29 @@ public class ProxyHostRequest
     [JsonPropertyName("forward_port")]
     public int ForwardPort { get; set; }
 
-    [JsonPropertyName("access_list_id")]
-    public int AccessListId { get; set; } = 0;
+    /// <summary>
+    /// Classic NPM access list id. Not sent to NPMplus (uses npmplus_access_list_* instead).
+    /// </summary>
+    [JsonIgnore]
+    public int AccessListId { get; set; }
+
+    [JsonPropertyName("npmplus_access_list_ids")]
+    public List<int> NpmplusAccessListIds { get; set; } = new();
+
+    [JsonPropertyName("npmplus_access_list_type")]
+    public string NpmplusAccessListType { get; set; } = "public";
 
     [JsonPropertyName("certificate_id")]
-    public int CertificateId { get; set; } = 0;
+    public int CertificateId { get; set; }
 
     [JsonPropertyName("ssl_forced")]
-    public int SslForced { get; set; } = 0;
+    public bool SslForced { get; set; }
 
     [JsonPropertyName("caching_enabled")]
-    public int CachingEnabled { get; set; } = 0;
+    public bool CachingEnabled { get; set; }
 
     [JsonPropertyName("block_exploits")]
-    public int BlockExploits { get; set; } = 1;
+    public bool BlockExploits { get; set; } = true;
 
     [JsonPropertyName("advanced_config")]
     public string AdvancedConfig { get; set; } = string.Empty;
@@ -608,19 +710,28 @@ public class ProxyHostRequest
     public Dictionary<string, object> Meta { get; set; } = new();
 
     [JsonPropertyName("allow_websocket_upgrade")]
-    public int AllowWebsocketUpgrade { get; set; } = 0;
+    public bool AllowWebsocketUpgrade { get; set; }
 
     [JsonPropertyName("http2_support")]
-    public int Http2Support { get; set; } = 0;
+    public bool Http2Support { get; set; }
 
     [JsonPropertyName("hsts_enabled")]
-    public int HstsEnabled { get; set; } = 0;
+    public bool HstsEnabled { get; set; }
 
     [JsonPropertyName("hsts_subdomains")]
-    public int HstsSubdomains { get; set; } = 0;
+    public bool HstsSubdomains { get; set; }
 
     [JsonPropertyName("enabled")]
-    public int Enabled { get; set; } = 1;
+    public bool Enabled { get; set; } = true;
+
+    [JsonPropertyName("npmplus_auth_request")]
+    public string NpmplusAuthRequest { get; set; } = "none";
+
+    [JsonPropertyName("npmplus_auth_request_upstream")]
+    public string NpmplusAuthRequestUpstream { get; set; } = string.Empty;
+
+    [JsonPropertyName("locations")]
+    public List<object> Locations { get; set; } = new();
 }
 
 public class Certificate

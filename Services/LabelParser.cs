@@ -6,12 +6,12 @@ namespace NpmDockerSync.Services;
 public class LabelParser
 {
     private readonly ILogger<LabelParser> _logger;
-    private readonly IConfiguration _configuration;
+    private readonly SettingsStore _settings;
 
-    public LabelParser(ILogger<LabelParser> logger, IConfiguration configuration)
+    public LabelParser(ILogger<LabelParser> logger, SettingsStore settings)
     {
         _logger = logger;
-        _configuration = configuration;
+        _settings = settings;
     }
 
     /// <summary>
@@ -503,10 +503,7 @@ public class LabelParser
 
     private bool GetConfigBool(string key, bool defaultValue)
     {
-        var value = _configuration[key];
-        if (string.IsNullOrEmpty(value))
-            return defaultValue;
-        return value.ToLowerInvariant() is "true" or "1" or "yes" or "on";
+        return _settings.GetBool(key, defaultValue);
     }
 
     private string? GetProxyLabelValue(IDictionary<string, string> labels, string type, string prefix, string suffix, int index)
@@ -620,16 +617,22 @@ public class LabelParser
             ForwardHost = config.ForwardHost,
             ForwardPort = config.ForwardPort ?? 0,
             AccessListId = config.AccessListId ?? 0,
+            NpmplusAccessListIds = config.AccessListId is > 0
+                ? new List<int> { config.AccessListId.Value }
+                : new List<int>(),
+            NpmplusAccessListType = config.AccessListId is > 0 ? "custom" : "public",
             CertificateId = config.CertificateId ?? 0,
-            SslForced = config.SslForced ? 1 : 0,
-            CachingEnabled = config.CachingEnabled ? 1 : 0,
-            BlockExploits = config.BlockExploits ? 1 : 0,
-            AllowWebsocketUpgrade = config.AllowWebsocketUpgrade ? 1 : 0,
-            Http2Support = config.Http2Support ? 1 : 0,
-            HstsEnabled = config.HstsEnabled ? 1 : 0,
-            HstsSubdomains = config.HstsSubdomains ? 1 : 0,
+            SslForced = config.SslForced,
+            CachingEnabled = config.CachingEnabled,
+            BlockExploits = config.BlockExploits,
+            AllowWebsocketUpgrade = config.AllowWebsocketUpgrade,
+            Http2Support = config.Http2Support,
+            HstsEnabled = config.HstsEnabled,
+            HstsSubdomains = config.HstsSubdomains,
             AdvancedConfig = config.AdvancedConfig,
-            Enabled = uiDisabled ? 0 : 1,
+            Enabled = !uiDisabled,
+            NpmplusAuthRequest = string.IsNullOrWhiteSpace(config.AuthRequest) ? "none" : config.AuthRequest,
+            NpmplusAuthRequestUpstream = config.AuthRequestUpstream ?? string.Empty,
             Meta = meta,
         };
     }
@@ -694,6 +697,8 @@ public class ProxyConfiguration
     public HomepageInfo? Homepage { get; set; }
     public ProxyLabelSource LabelSource { get; set; } = ProxyLabelSource.Npm;
     public bool WebsocketsExplicitlySet { get; set; }
+    public string? AuthRequest { get; set; }
+    public string? AuthRequestUpstream { get; set; }
 }
 
 public class StreamConfiguration

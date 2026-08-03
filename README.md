@@ -10,7 +10,11 @@ Monitor 🐳 Docker containers and automatically synchronize proxy configuration
 - Automatically creates/updates/removes proxy hosts and streams in NPMplus
 - Supports all NPM / NPMplus proxy host configuration options via labels
 - **GoDoxy label compatibility** — understand [`proxy.*` labels](https://docs.godoxy.dev/docs/godoxy/getting-started/Configuring-Routes) during migration; `npm.*` overrides overlaps
-- **Lightweight Web UI** — Shadcn-based Apps dashboard for synced/missing overview and NPM enable/disable
+- **Lightweight Web UI** — Apps / Settings / Tunnels dashboard (enable/disable, edit forward/TLS/auth, OIDC or token auth)
+- **SQLite persistence** — settings, route overrides, and tunnels at `/data/npm-docker-sync.db`
+- **Komodo links** — deep-link containers to stacks/deployments when Komodo is configured
+- **selfh.st icons** — auto-resolve icons with UI override
+- **Dev tunnels** — temporary NPMplus share URLs + VS Code extension (reachable host required)
 - **Stream hosts (TCP/UDP forwarding)** - Forward non-HTTP traffic like databases, game servers, custom protocols
 - **Multiple proxy hosts/streams per container** - Route different domains/ports on the same container
 - **Automatic port detection** - Infers port from container's EXPOSE or -p mappings when not specified
@@ -45,8 +49,14 @@ Monitor 🐳 Docker containers and automatically synchronize proxy configuration
   - Used when containers aren't on the same network as NPM
   - If not set, will try `host.docker.internal` or Docker bridge gateway
 - `WEB_UI_PORT`: Port for the embedded web UI (default: `8080`)
-- `WEB_UI_TOKEN`: Optional bearer token required for `/api/*` (except `/api/health`). When empty, the API is open.
+- `WEB_UI_TOKEN`: Optional bearer token required for `/api/*` (except `/api/health`). When empty, the API is open. **Required to save settings from the UI.**
+- `SQLITE_PATH`: SQLite database path (default: `/data/npm-docker-sync.db`). Mount a volume on `/data`.
 - `NPM_TLS_SKIP_VERIFY`: Skip TLS certificate validation for NPM API calls (`true`/`false`, default: `false`). Useful for NPMplus self-signed HTTPS or HTTP→HTTPS redirects.
+- `NPM_ADOPT_EXISTING`: When `true`, claim unmanaged NPMplus proxy hosts whose domains overlap container labels (updates them in place and attaches automation meta). Default: `false` (logs a CONFLICT and skips).
+- `OIDC_AUTHORITY` / `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` / `OIDC_SCOPES`: OpenID Connect for the web UI (set at process start so the auth middleware registers).
+- `KOMODO_URL` / `KOMODO_SERVER` / `KOMODO_API_KEY` / `KOMODO_API_SECRET`: Komodo deep links via `GetResourceMatchingContainer`.
+- `AUTH_REQUEST_DEFAULT` / `AUTH_REQUEST_UPSTREAM`: Default NPMplus `npmplus_auth_request` provider for synced routes (`none`, `authentik`, `oauth2proxy`, …).
+- `TUNNEL_BASE_DOMAIN` / `TUNNEL_FORWARD_HOST` / `TUNNEL_DEFAULT_TTL_MINUTES` / `TUNNEL_API_TOKEN` / `TUNNEL_REQUIRE_AUTH`: Temporary share tunnels (NPMplus must reach the forward host).
 
 ### Proxy Defaults (Optional)
 
@@ -279,18 +289,21 @@ With automatic network detection enabled:
 ```yaml
 services:
   npm-docker-sync:
-    image: ghcr.io/redth/npm-docker-sync:latest
+    image: ghcr.io/danielc7205/npm-docker-sync:latest
     environment:
       - DOCKER_HOST=unix:///var/run/docker.sock
       - NPM_URL=http://npmplus:81
       - NPM_EMAIL=admin@example.com
       - NPM_PASSWORD=changeme
       - NPM_CONTAINER_NAME=npmplus  # Enable auto-detection
+      - SQLITE_PATH=/data/npm-docker-sync.db
+      - WEB_UI_TOKEN=changeme
       # Optional: Set global defaults for all proxies
       - NPM_PROXY_SSL_FORCE=true
       - NPM_PROXY_BLOCK_EXPLOITS=true
       - NPM_PROXY_WEBSOCKETS=false
     volumes:
+      - npm-docker-sync-data:/data
       - /var/run/docker.sock:/var/run/docker.sock
     networks:
       - npm
@@ -298,6 +311,8 @@ services:
 networks:
   npm:
     external: true  # Assuming NPM is on this network
+volumes:
+  npm-docker-sync-data:
 ```
 
 ### Example label usage:
@@ -367,7 +382,7 @@ docker run -d \
   -e NPM_EMAIL=admin@example.com \
   -e NPM_PASSWORD=changeme \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  ghcr.io/redth/npm-docker-sync:latest
+  ghcr.io/danielc7205/npm-docker-sync:latest
 ```
 
 ## How It Works
@@ -517,6 +532,17 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
 ```
+
+## Web UI & persistence
+
+Mount a volume at `/data` so SQLite settings survive restarts (`SQLITE_PATH=/data/npm-docker-sync.db`).
+
+- **Apps**: route overview, enable/disable, edit sheet (port/scheme/TLS/auth/icon), Komodo links, selfh.st icons
+- **Settings**: edit most configuration when `WEB_UI_TOKEN` or OIDC is configured
+- **Tunnels**: temporary share URLs under `TUNNEL_BASE_DOMAIN` (host must be reachable from NPMplus)
+- **VS Code extension**: see [`vscode-extension/README.md`](vscode-extension/README.md)
+
+Repository: [github.com/DanielC7205/npm-docker-sync](https://github.com/DanielC7205/npm-docker-sync)
 
 ## Building
 

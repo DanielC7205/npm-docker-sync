@@ -1,0 +1,68 @@
+{
+  "name": "npm-docker-sync",
+  "displayName": "NPM Docker Sync Tunnels",
+  "description": "Share local workspace ports via temporary NPMplus tunnels",
+  "version": "0.1.0",
+  "publisher": "danielc7205",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": [
+    "onCommand:npmDockerSync.sharePort",
+    "onCommand:npmDockerSync.copyUrl",
+    "onCommand:npmDockerSync.stopTunnel",
+    "onCommand:npmDockerSync.listTunnels"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "npmDockerSync.sharePort",
+        "title": "NPM Docker Sync: Share Port…"
+      },
+      {
+        "command": "npmDockerSync.copyUrl",
+        "title": "NPM Docker Sync: Copy Active Tunnel URL"
+      },
+      {
+        "command": "npmDockerSync.stopTunnel",
+        "title": "NPM Docker Sync: Stop Tunnel"
+      },
+      {
+        "command": "npmDockerSync.listTunnels",
+        "title": "NPM Docker Sync: List Tunnels"
+      }
+    ],
+    "configuration": {
+      "title": "NPM Docker Sync",
+      "properties": {
+        "npmDockerSync.url": {
+          "type": "string",
+          "default": "http://localhost:8080",
+          "description": "Base URL of npm-docker-sync web UI / API"
+        },
+        "npmDockerSync.token": {
+          "type": "string",
+          "default": "",
+          "description": "WEB_UI_TOKEN or TUNNEL_API_TOKEN bearer token"
+        },
+        "npmDockerSync.forwardHost": {
+          "type": "string",
+          "default": "",
+          "description": "Optional override for tunnel forward host (LAN/Tailscale IP)"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "vscode:prepublish": "npm run compile"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.3.3"
+  }
+}
