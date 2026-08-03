@@ -55,6 +55,7 @@ Monitor 🐳 Docker containers and automatically synchronize proxy configuration
 - `NPM_ADOPT_EXISTING`: When `true`, claim unmanaged NPMplus proxy hosts whose domains overlap container labels (updates them in place and attaches automation meta). Default: `false` (logs a CONFLICT and skips).
 - `OIDC_AUTHORITY` / `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` / `OIDC_SCOPES`: OpenID Connect for the web UI (set at process start so the auth middleware registers).
 - `KOMODO_URL` / `KOMODO_SERVER` / `KOMODO_API_KEY` / `KOMODO_API_SECRET`: Komodo deep links via `GetResourceMatchingContainer`.
+- `PROXY_BASE_DOMAIN`: When set (e.g. `example.com`), short domain aliases without a dot expand to `{alias}.{PROXY_BASE_DOMAIN}` for both `proxy.aliases` and `npm.proxy.domains`.
 - `AUTH_REQUEST_DEFAULT` / `AUTH_REQUEST_UPSTREAM`: Default NPMplus `npmplus_auth_request` provider for synced routes (`none`, `authentik`, `oauth2proxy`, …).
 - `TUNNEL_BASE_DOMAIN` / `TUNNEL_FORWARD_HOST` / `TUNNEL_DEFAULT_TTL_MINUTES` / `TUNNEL_API_TOKEN` / `TUNNEL_REQUIRE_AUTH`: Temporary share tunnels (NPMplus must reach the forward host).
 

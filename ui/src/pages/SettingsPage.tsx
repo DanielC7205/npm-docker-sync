@@ -22,6 +22,7 @@ const SECTIONS: { title: string; keys: { key: string; label: string; secret?: bo
   {
     title: 'Proxy defaults',
     keys: [
+      { key: 'PROXY_BASE_DOMAIN', label: 'Base domain for short aliases (e.g. example.com)' },
       { key: 'NPM_PROXY_SSL_FORCE', label: 'Force SSL', bool: true },
       { key: 'NPM_PROXY_WEBSOCKETS', label: 'WebSockets', bool: true },
       { key: 'NPM_PROXY_HTTP2', label: 'HTTP/2', bool: true },

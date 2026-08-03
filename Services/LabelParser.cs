@@ -120,7 +120,7 @@ public class LabelParser
         var config = new ProxyConfiguration
         {
             Index = index,
-            DomainNames = SplitCsv(domainNames),
+            DomainNames = SplitCsv(domainNames).Select(ExpandDomainAlias).ToList(),
             ForwardHost = forwardHost?.Trim() ?? string.Empty,
             ForwardPort = forwardPort,
             ForwardScheme = GetProxyLabelValue(labels, "proxy", prefix, "scheme", index) ?? "http",
@@ -204,7 +204,7 @@ public class LabelParser
             candidates.Add(new ProxyConfiguration
             {
                 Index = internalIndex,
-                DomainNames = new List<string> { aliases[i] },
+                DomainNames = new List<string> { ExpandDomainAlias(aliases[i]) },
                 ForwardHost = host,
                 ForwardPort = port,
                 ForwardScheme = scheme.ToLowerInvariant(),
@@ -504,6 +504,23 @@ public class LabelParser
     private bool GetConfigBool(string key, bool defaultValue)
     {
         return _settings.GetBool(key, defaultValue);
+    }
+
+    /// <summary>
+    /// Short aliases without a dot become {alias}.{PROXY_BASE_DOMAIN} when configured
+    /// (GoDoxy-style: proxy.aliases=home → home.example.com).
+    /// </summary>
+    private string ExpandDomainAlias(string alias)
+    {
+        var trimmed = alias.Trim();
+        if (string.IsNullOrEmpty(trimmed) || trimmed.Contains('.'))
+            return trimmed;
+
+        var baseDomain = _settings.Get("PROXY_BASE_DOMAIN")?.Trim().TrimStart('.');
+        if (string.IsNullOrWhiteSpace(baseDomain))
+            return trimmed;
+
+        return $"{trimmed}.{baseDomain}";
     }
 
     private string? GetProxyLabelValue(IDictionary<string, string> labels, string type, string prefix, string suffix, int index)

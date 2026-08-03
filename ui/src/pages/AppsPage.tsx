@@ -203,9 +203,9 @@ export function AppsPage() {
                   <div className="truncate text-muted-foreground">
                     {route.domains.join(', ') || 'No domains'}
                   </div>
-                  <div className="truncate font-mono text-xs">
-                    {route.forwardScheme}://{route.forwardHost}:{route.forwardPort}
-                  </div>
+                  {formatForward(route) && (
+                    <div className="truncate font-mono text-xs">{formatForward(route)}</div>
+                  )}
                   <div className="flex items-center justify-between gap-2">
                     <div className="flex items-center gap-2">
                       {canToggle && (
@@ -246,6 +246,17 @@ export function AppsPage() {
       />
     </div>
   )
+}
+
+function formatForward(route: RouteInfo): string | null {
+  if (route.status === 'Excluded') return null
+  const host = route.forwardHost?.trim()
+  const port = route.forwardPort
+  if (!host && !port) return null
+  const scheme = route.forwardScheme?.trim() || 'http'
+  if (host && port) return `${scheme}://${host}:${port}`
+  if (host) return `${scheme}://${host}`
+  return `${scheme}://?:${port}`
 }
 
 function StatCard({ title, value, icon }: { title: string; value: string | number; icon: React.ReactNode }) {

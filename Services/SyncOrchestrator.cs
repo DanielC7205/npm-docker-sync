@@ -325,6 +325,41 @@ public class SyncOrchestrator
 
                 ApplyDefaultAuthRequest(config);
 
+                // Prefer live NPM host forward target; otherwise infer for display
+                var forwardHost = !string.IsNullOrWhiteSpace(config.ForwardHost)
+                    ? config.ForwardHost
+                    : npmHost?.ForwardHost;
+                var forwardPort = config.ForwardPort
+                    ?? (npmHost is { ForwardPort: > 0 } ? npmHost.ForwardPort : null);
+                var forwardScheme = !string.IsNullOrWhiteSpace(config.ForwardScheme)
+                    ? config.ForwardScheme
+                    : (npmHost?.ForwardScheme ?? "http");
+
+                if (string.IsNullOrWhiteSpace(forwardHost))
+                {
+                    try
+                    {
+                        forwardHost = await _networkService.InferForwardHost(
+                            containerId, null, cancellationToken, config.PreferredNetwork);
+                    }
+                    catch
+                    {
+                        // leave empty for UI
+                    }
+                }
+
+                if (!forwardPort.HasValue)
+                {
+                    try
+                    {
+                        forwardPort = await _networkService.InferForwardPort(containerId, cancellationToken);
+                    }
+                    catch
+                    {
+                        // leave empty for UI
+                    }
+                }
+
                 var icon = await _iconResolver.ResolveAsync(
                     routeOverride?.Icon,
                     config.Homepage?.Icon,
@@ -353,9 +388,9 @@ public class SyncOrchestrator
                     Category = config.Homepage?.Category
                                ?? (config.LabelSource == ProxyLabelSource.GoDoxy ? "Docker" : "NPM"),
                     Domains = config.DomainNames,
-                    ForwardHost = config.ForwardHost,
-                    ForwardPort = config.ForwardPort,
-                    ForwardScheme = config.ForwardScheme,
+                    ForwardHost = forwardHost,
+                    ForwardPort = forwardPort,
+                    ForwardScheme = forwardScheme,
                     Status = status,
                     NpmHostId = npmHost?.Id,
                     Enabled = npmHost == null ? null : !uiDisabled && npmHost.Enabled == 1,
@@ -367,9 +402,9 @@ public class SyncOrchestrator
                     AllowWebsocketUpgrade = config.AllowWebsocketUpgrade,
                     CachingEnabled = config.CachingEnabled,
                     BlockExploits = config.BlockExploits,
-                    CertificateId = config.CertificateId,
-                    AuthRequest = config.AuthRequest,
-                    AuthRequestUpstream = config.AuthRequestUpstream,
+                    CertificateId = config.CertificateId ?? npmHost?.CertificateId,
+                    AuthRequest = config.AuthRequest ?? npmHost?.NpmplusAuthRequest,
+                    AuthRequestUpstream = config.AuthRequestUpstream ?? npmHost?.NpmplusAuthRequestUpstream,
                     AuthExempt = routeOverride?.AuthExempt,
                     HasUiOverride = routeOverride != null,
                     KomodoUrl = komodo?.Url,
