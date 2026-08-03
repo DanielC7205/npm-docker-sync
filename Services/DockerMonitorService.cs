@@ -33,24 +33,58 @@ public class DockerMonitorService : BackgroundService
     {
         _logger.LogInformation("Docker Monitor Service starting. Connecting to: {DockerHost}", _dockerHost);
 
-        try
+        while (!stoppingToken.IsCancellationRequested)
         {
-            // Initialize network detection
-            await _networkService.InitializeAsync(stoppingToken);
-
-            // Restore state from NPM (maps container IDs to proxy/stream IDs and label hashes)
-            await _syncOrchestrator.RestoreStateFromNpm(_dockerClient, stoppingToken);
-
-            // Perform initial scan of all containers
-            await PerformInitialScan(stoppingToken);
-
-            // Start monitoring for events
-            await MonitorDockerEvents(stoppingToken);
+            try
+            {
+                await _networkService.InitializeAsync(stoppingToken);
+                await RestoreStateWithRetry(stoppingToken);
+                await PerformInitialScan(stoppingToken);
+                await MonitorDockerEvents(stoppingToken);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Docker Monitor Service error; retrying in 10s (web UI stays available)");
+                try
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(10), stoppingToken);
+                }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                {
+                    break;
+                }
+            }
         }
-        catch (Exception ex)
+    }
+
+    private async Task RestoreStateWithRetry(CancellationToken stoppingToken)
+    {
+        var attempt = 0;
+        while (!stoppingToken.IsCancellationRequested)
         {
-            _logger.LogError(ex, "Fatal error in Docker Monitor Service");
-            throw;
+            attempt++;
+            try
+            {
+                await _syncOrchestrator.RestoreStateFromNpm(_dockerClient, stoppingToken);
+                return;
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                var delay = TimeSpan.FromSeconds(Math.Min(30, 3 * attempt));
+                _logger.LogWarning(ex,
+                    "Failed to reach NPMplus/NPM (attempt {Attempt}). Retrying in {DelaySeconds}s. " +
+                    "If using HTTPS with a self-signed cert, set NPM_TLS_SKIP_VERIFY=true.",
+                    attempt, delay.TotalSeconds);
+                await Task.Delay(delay, stoppingToken);
+            }
         }
     }
 
@@ -117,21 +151,14 @@ public class DockerMonitorService : BackgroundService
 
         _logger.LogDebug("Container event: {Action} for {ContainerId}", action, containerId);
 
-        // Handle start and update events - these may include label changes
         if (action is "start" or "update")
         {
             try
             {
-                // Fetch container details to get current labels
                 var container = await _dockerClient.Containers.InspectContainerAsync(containerId, stoppingToken);
 
                 if (container.Config?.Labels != null)
                 {
-                    // Always process the container - ProcessContainer will handle:
-                    // - Creating proxy if labels are present and it's new
-                    // - Updating proxy if labels changed
-                    // - Deleting proxy if labels were removed
-                    // - Skipping if nothing changed
                     var containerName = container.Name.TrimStart('/');
                     _logger.LogInformation("Container {Name} {Action}", containerName, action);
                     await _syncOrchestrator.ProcessContainer(containerId, containerName, container.Config.Labels, stoppingToken);
@@ -144,7 +171,6 @@ public class DockerMonitorService : BackgroundService
         }
         else if (action is "stop" or "die" or "destroy")
         {
-            // Try to get the container name from the event actor attributes
             var containerName = containerId;
             if (message.Actor?.Attributes != null && message.Actor.Attributes.TryGetValue("name", out var name))
             {
@@ -155,10 +181,11 @@ public class DockerMonitorService : BackgroundService
         }
     }
 
-    private bool HasProxyLabels(IDictionary<string, string> labels)
-    {
-        return labels.Any(l => l.Key.StartsWith("npm.") || l.Key.StartsWith("npm-"));
-    }
+    private static bool HasProxyLabels(IDictionary<string, string> labels) =>
+        labels.Any(l =>
+            l.Key.StartsWith("npm.") ||
+            l.Key.StartsWith("npm-") ||
+            l.Key.StartsWith("proxy.", StringComparison.OrdinalIgnoreCase));
 
     public override void Dispose()
     {

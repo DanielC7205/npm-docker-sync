@@ -1,40 +1,49 @@
-# networks:
-#   proxy:
-#     driver: bridge
-
 services:
   # The npm-docker-sync service
   npm-docker-sync:
     build: .
     container_name: npm-docker-sync
+    ports:
+      - "8080:8080"
     environment:
       - DOCKER_HOST=unix:///var/run/docker.sock
-      - NPM_URL=https://urls.jjagd.net
-      - NPM_EMAIL=${NPM_EMAIL:-admin@email.com}
+      - NPM_URL=http://npmplus:81
+      - NPM_EMAIL=${NPM_EMAIL:-admin@example.org}
       - NPM_PASSWORD=${NPM_PASSWORD:-changeme}
-      - NPM_CONTAINER_NAME=NGinx-Proxy-Manager
+      - NPM_CONTAINER_NAME=npmplus
       - DOCKER_HOST_IP=192.168.1.100  # Set to your host machine's IP
+      - WEB_UI_PORT=8080
+      - NPM_TLS_SKIP_VERIFY=true
+      - SYNC_INSTANCE_ID=docker-compose-test
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Podman Desktop on macOS: /var/run/docker.sock is a host symlink and fails inside the
+      # container with "Permission denied". Point DOCKER_SOCKET at the real machine socket, e.g.
+      # DOCKER_SOCKET=$HOME/.local/share/containers/podman/machine/podman.sock
+      - ${DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
     extra_hosts:
       - "host.docker.internal:host-gateway"  # Enable host.docker.internal on Linux
+    networks:
+      - proxy
+    depends_on:
+      - npmplus
     restart: unless-stopped
-    # depends_on:
-    #   - nginx-proxy-manager
 
-  # Nginx Proxy Manager (mock - replace with your actual NPM instance)
-  nginx-proxy-manager:
-    image: jc21/nginx-proxy-manager:latest
-    container_name: NGinx-Proxy-Manager
+  # NPMplus (ZoeyVid fork of Nginx Proxy Manager)
+  # https://github.com/ZoeyVid/NPMplus
+  npmplus:
+    image: docker.io/zoeyvid/npmplus:latest
+    container_name: npmplus
     ports:
       - "8980:80"
       - "8981:81"
       - "8443:443"
     environment:
-      - DB_SQLITE_FILE=/data/database.sqlite
+      - TZ=${TZ:-UTC}
+      - INITIAL_ADMIN_EMAIL=${NPM_EMAIL:-admin@example.org}
+      - INITIAL_ADMIN_PASSWORD=${NPM_PASSWORD:-changeme}
+      - DISABLE_IPV6=true
     volumes:
-      - npm_data:/data
-      - npm_letsencrypt:/etc/letsencrypt
+      - npmplus_data:/data
     networks:
       - proxy
     restart: unless-stopped
@@ -54,7 +63,7 @@ services:
       npm.proxy.block_common_exploits: "true"
       npm.proxy.websockets: "false"
 
-  # # Test service 2: Another echo server with SSL configured
+  # Test service 2: Another echo server with SSL configured
   echo-service-2:
     image: hashicorp/http-echo:latest
     container_name: echo-service-2
@@ -85,17 +94,20 @@ services:
 
   # Test service 4: Echo with manual override
   echo-manual:
-   image: hashicorp/http-echo:latest
-   container_name: echo-manual
-   command: ["-text=Hello from echo-manual with explicit host!"]
-   networks:
-     - proxy
-   labels:
-     npm.proxy.domains: "manual.local.test"
-     npm.proxy.host: "echo-manual"  # Explicitly specified
-     npm.proxy.port: "5678"
-     npm.proxy.scheme: "http"
+    image: hashicorp/http-echo:latest
+    container_name: echo-manual
+    command: ["-text=Hello from echo-manual with explicit host!"]
+    networks:
+      - proxy
+    labels:
+      npm.proxy.domains: "manual.local.test"
+      npm.proxy.host: "echo-manual"  # Explicitly specified
+      npm.proxy.port: "5678"
+      npm.proxy.scheme: "http"
+
+networks:
+  proxy:
+    driver: bridge
 
 volumes:
-  npm_data:
-  npm_letsencrypt:
+  npmplus_data:

@@ -58,12 +58,22 @@ public class NpmMirrorSyncService : BackgroundService
         // Initial sync
         await PerformSync(stoppingToken);
 
-        // Periodic sync loop
+        // Periodic sync loop — also wakes early when RequestSync() is called
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
-                await Task.Delay(_syncInterval, stoppingToken);
+                var waited = TimeSpan.Zero;
+                while (waited < _syncInterval && !stoppingToken.IsCancellationRequested)
+                {
+                    if (_syncRequested)
+                        break;
+
+                    var slice = TimeSpan.FromSeconds(1);
+                    await Task.Delay(slice, stoppingToken);
+                    waited += slice;
+                }
+
                 await PerformSync(stoppingToken);
             }
             catch (TaskCanceledException)
@@ -294,7 +304,20 @@ public class SecondaryNpmClient
         _email = email;
         _password = password;
         _logger = logger;
-        _httpClient = new HttpClient { BaseAddress = new Uri(Url) };
+        _httpClient = new HttpClient(CreateHandler()) { BaseAddress = new Uri(Url) };
+    }
+
+    private static HttpMessageHandler CreateHandler()
+    {
+        var handler = new HttpClientHandler();
+        var skipTls = Environment.GetEnvironmentVariable("NPM_TLS_SKIP_VERIFY")?.ToLowerInvariant()
+            is "true" or "1" or "yes" or "on";
+        if (skipTls)
+        {
+            handler.ServerCertificateCustomValidationCallback =
+                HttpClientHandler.DangerousAcceptAnyServerCertificateValidator;
+        }
+        return handler;
     }
 
     public async Task EnsureAuthenticatedAsync(CancellationToken cancellationToken)

@@ -1,13 +1,14 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-The solution targets .NET 8.0 and runs from `Program.cs`, which wires up the background services. Reusable logic lives in `Services/` (e.g., `DockerMonitorService`, `NginxProxyManagerClient`). Runtime configuration defaults reside in `appsettings.json`, while container assets sit in `Dockerfile` and `docker-compose.test.yml`. Build artefacts land in `bin/` and `obj/`; keep them ignored in commits.
+The solution targets .NET 8.0 and runs from `Program.cs`, which wires up the background services and Minimal API. Reusable logic lives in `Services/` (e.g., `DockerMonitorService`, `NginxProxyManagerClient`). The embedded Apps UI lives under `ui/` (Vite + React + Shadcn) and builds into `wwwroot/`. Runtime configuration defaults reside in `appsettings.json`, while container assets sit in `Dockerfile` and `docker-compose.test.yml`. Build artefacts land in `bin/` and `obj/`; keep them ignored in commits.
 
 ## Build, Test, and Development Commands
 - `dotnet restore` — install NuGet dependencies defined in `NpmDockerSync.csproj`.
-- `dotnet build` — compile the console host and fail fast on warnings-as-errors set in the SDK.
-- `dotnet run` — run the sync service locally; set `DOCKER_HOST`/`NPM_URL` via env vars.
-- `docker build -t npm-docker-sync .` — produce the shipping container image.
+- `dotnet build` — compile the host and fail fast on warnings-as-errors set in the SDK.
+- `dotnet run` — run the sync service locally; set `DOCKER_HOST`/`NPM_URL` via env vars. Build the UI first (`cd ui && npm run build`) so `wwwroot/` exists.
+- `cd ui && npm install && npm run build` — produce the SPA into `wwwroot/`.
+- `docker build -t npm-docker-sync .` — produce the shipping container image (includes UI build).
 Run commands from the repository root to respect solution-relative paths.
 
 ## Coding Style & Naming Conventions

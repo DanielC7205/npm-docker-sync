@@ -139,7 +139,11 @@ public class DockerNetworkService
         }
     }
 
-    public async Task<string> InferForwardHost(string containerId, string? explicitHost, CancellationToken cancellationToken)
+    public async Task<string> InferForwardHost(
+        string containerId,
+        string? explicitHost,
+        CancellationToken cancellationToken,
+        string? preferredNetwork = null)
     {
         // If explicitly provided, use it
         if (!string.IsNullOrEmpty(explicitHost))
@@ -150,11 +154,21 @@ public class DockerNetworkService
             // Get container details
             var container = await _dockerClient.Containers.InspectContainerAsync(containerId, cancellationToken);
             var containerName = container.Name.TrimStart('/');
+            var containerNetworks = container.NetworkSettings?.Networks?.Keys.ToHashSet()
+                ?? new HashSet<string>();
+
+            // GoDoxy proxy.network: prefer that network when the container is attached
+            if (!string.IsNullOrEmpty(preferredNetwork) && containerNetworks.Contains(preferredNetwork))
+            {
+                _logger.LogInformation(
+                    "Container {ContainerName} preferred network {Network} present. Using container name as forward host.",
+                    containerName, preferredNetwork);
+                return containerName;
+            }
 
             // Check if container is on the same network as NPM
-            if (_npmNetworks != null && container.NetworkSettings?.Networks != null)
+            if (_npmNetworks != null && containerNetworks.Count > 0)
             {
-                var containerNetworks = container.NetworkSettings.Networks.Keys.ToHashSet();
                 var sharedNetworks = _npmNetworks.Intersect(containerNetworks).ToList();
 
                 if (sharedNetworks.Any())

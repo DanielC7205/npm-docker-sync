@@ -1,14 +1,16 @@
 # Nginx-Proxy-Manager Docker Sync
 
-Monitor 🐳 Docker containers and automatically synchronize proxy configurations specified as docker labels to [Nginx Proxy Manager](https://nginxproxymanager.com) (inspired by [lucaslorentz/caddy-docker-proxy](https://github.com/lucaslorentz/caddy-docker-proxy).
+Monitor 🐳 Docker containers and automatically synchronize proxy configurations specified as docker labels to [NPMplus](https://github.com/ZoeyVid/NPMplus) (a fork of [Nginx Proxy Manager](https://nginxproxymanager.com)) — inspired by [lucaslorentz/caddy-docker-proxy](https://github.com/lucaslorentz/caddy-docker-proxy).
 
-🎁 Bonus: 1:n mirroring of hosts and access lists for keeping multiple instances of Nginx-Proxy-Manager synchronized (inspired by [jeffersonraimon/npm-sync](https://github.com/jeffersonraimon/npm-sync)).
+🎁 Bonus: 1:n mirroring of hosts and access lists for keeping multiple NPMplus / NPM instances synchronized (inspired by [jeffersonraimon/npm-sync](https://github.com/jeffersonraimon/npm-sync)).
 
 ## Features
 
 - Monitors Docker events in real-time
-- Automatically creates/updates/removes proxy hosts and streams in Nginx-Proxy-Manager
-- Supports all NPM proxy host configuration options via labels
+- Automatically creates/updates/removes proxy hosts and streams in NPMplus
+- Supports all NPM / NPMplus proxy host configuration options via labels
+- **GoDoxy label compatibility** — understand [`proxy.*` labels](https://docs.godoxy.dev/docs/godoxy/getting-started/Configuring-Routes) during migration; `npm.*` overrides overlaps
+- **Lightweight Web UI** — Shadcn-based Apps dashboard for synced/missing overview and NPM enable/disable
 - **Stream hosts (TCP/UDP forwarding)** - Forward non-HTTP traffic like databases, game servers, custom protocols
 - **Multiple proxy hosts/streams per container** - Route different domains/ports on the same container
 - **Automatic port detection** - Infers port from container's EXPOSE or -p mappings when not specified
@@ -25,11 +27,11 @@ Monitor 🐳 Docker containers and automatically synchronize proxy configuration
 ### Required Environment Variables
 
 - `DOCKER_HOST`: Docker socket path (default: `unix:///var/run/docker.sock`)
-- `NPM_URL`: Nginx Proxy Manager URL (e.g., `http://nginx-proxy-manager:81`)
+- `NPM_URL`: NPMplus / NPM admin API URL (e.g., `http://npmplus:81`)
   - Automatically normalized (lowercase, trailing slashes removed, default ports omitted)
   - Examples that are treated as identical: `https://npm.example.com/`, `HTTPS://npm.example.com`, `https://NPM.EXAMPLE.COM:443`
-- `NPM_EMAIL`: NPM admin email
-- `NPM_PASSWORD`: NPM admin password
+- `NPM_EMAIL`: NPMplus admin email
+- `NPM_PASSWORD`: NPMplus admin password
 
 ### Optional Environment Variables
 
@@ -37,11 +39,14 @@ Monitor 🐳 Docker containers and automatically synchronize proxy configuration
   - **Recommended for multi-host setups**: Set to a unique value per Docker host (e.g., `docker-host-1`, `prod-server-a`)
   - If not set, automatically uses Docker daemon ID or Swarm node ID
   - Multiple sync instances with different IDs can safely manage the same NPM instance
-- `NPM_CONTAINER_NAME`: Name or ID of the NPM container for network detection (enables automatic `npm.proxy.host` inference)
+- `NPM_CONTAINER_NAME`: Name or ID of the NPMplus container for network detection (enables automatic `npm.proxy.host` inference)
 - `DOCKER_HOST_IP`: Explicit Docker host IP address
   - **Recommended**: Set to your host machine's LAN IP (e.g., `192.168.1.100`)
   - Used when containers aren't on the same network as NPM
   - If not set, will try `host.docker.internal` or Docker bridge gateway
+- `WEB_UI_PORT`: Port for the embedded web UI (default: `8080`)
+- `WEB_UI_TOKEN`: Optional bearer token required for `/api/*` (except `/api/health`). When empty, the API is open.
+- `NPM_TLS_SKIP_VERIFY`: Skip TLS certificate validation for NPM API calls (`true`/`false`, default: `false`). Useful for NPMplus self-signed HTTPS or HTTP→HTTPS redirects.
 
 ### Proxy Defaults (Optional)
 
@@ -113,6 +118,64 @@ npm.proxy.0.domains: example.com     # Index 0 (explicit)
 > Labels can use either the `npm.` or `npm-` prefix (e.g., `npm.proxy.scheme` or `npm-proxy.scheme`).
 >
 > **Note**: Label values override environment variable defaults. If you set `NPM_PROXY_SSL_FORCE=true` globally, you can still use `npm.proxy.ssl.force=false` on specific containers to disable it.
+
+## GoDoxy Label Compatibility
+
+While migrating to [GoDoxy](https://docs.godoxy.dev/docs/godoxy/getting-started/Configuring-Routes), you can use GoDoxy `proxy.*` Docker labels. The sync service maps the NPM-relevant subset into proxy hosts.
+
+### Merge rules
+
+1. Parse GoDoxy `proxy.*` labels (if present and not excluded).
+2. Parse existing `npm.*` / `npm-*` labels.
+3. Merge by index: GoDoxy values first, then **`npm.*` overrides** any overlapping fields.
+4. GoDoxy-originated routes default WebSockets to **on** (GoDoxy handles WS automatically) unless `npm.proxy.websockets` is set explicitly.
+5. SSL, certificates, access lists, HSTS, etc. remain npm-only (plus env defaults).
+
+### Supported GoDoxy labels
+
+| GoDoxy label | Maps to |
+|---|---|
+| `proxy.aliases` | Domain names |
+| `proxy.#N.port` / `proxy.ports` | Forward port (`listen:proxy` uses the right-hand side) |
+| `proxy.#N.host` / `proxy.hosts` | Forward host |
+| `proxy.#N.scheme` / `proxy.schemes` / `proxy.protos` / `proxy.protocols` | Forward scheme (`http`/`https` only) |
+| `proxy.exclude` | Skip sync when `true` |
+| `proxy.network` | Preferred Docker network for host inference |
+| `proxy.#N.homepage` | UI display metadata (`name`, `icon`, `description`, `category`) |
+
+GoDoxy indices are **1-based** (`#1`, `#2`); internally they map to 0-based indices. Aliases that share the same host/port/scheme are grouped into one NPM proxy host.
+
+**Example:**
+```yaml
+labels:
+  proxy.aliases: app, app.example.com
+  proxy.#1.port: 80
+  proxy.idle_timeout: 1h   # ignored for NPM sync
+  proxy.#1.homepage: |
+    name: My App
+    icon: "@selfhst/app.svg"
+    category: Docker
+```
+
+You can gradually add `npm.proxy.*` on the same container to override domains, SSL, websockets, etc. without removing GoDoxy labels yet.
+
+## Web UI
+
+The service embeds a lightweight Apps dashboard (React + Shadcn) on `WEB_UI_PORT` (default `8080`).
+
+- Overview cards: uptime, synced / missing / disabled counts
+- Route grid with status badges and search/filters
+- **NPM toggle** to enable/disable the proxy host (persisted via `meta.ui_disabled` across recreate)
+- **Sync** action for routes that have labels but are missing from NPM
+
+### Local UI build
+
+```bash
+cd ui && npm install && npm run build   # outputs to ../wwwroot
+dotnet run
+```
+
+Docker builds the UI in a multi-stage image automatically.
 
 ## Stream Hosts (TCP/UDP Forwarding)
 
@@ -219,16 +282,16 @@ services:
     image: ghcr.io/redth/npm-docker-sync:latest
     environment:
       - DOCKER_HOST=unix:///var/run/docker.sock
-      - NPM_URL=http://nginx-proxy-manager:81
+      - NPM_URL=http://npmplus:81
       - NPM_EMAIL=admin@example.com
       - NPM_PASSWORD=changeme
-      - NPM_CONTAINER_NAME=nginx-proxy-manager  # Enable auto-detection
+      - NPM_CONTAINER_NAME=npmplus  # Enable auto-detection
       # Optional: Set global defaults for all proxies
       - NPM_PROXY_SSL_FORCE=true
       - NPM_PROXY_BLOCK_EXPLOITS=true
       - NPM_PROXY_WEBSOCKETS=false
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     networks:
       - npm
     restart: unless-stopped
@@ -300,10 +363,10 @@ services:
 docker run -d \
   --name npm-docker-sync \
   -e DOCKER_HOST=unix:///var/run/docker.sock \
-  -e NPM_URL=http://nginx-proxy-manager:81 \
+  -e NPM_URL=http://npmplus:81 \
   -e NPM_EMAIL=admin@example.com \
   -e NPM_PASSWORD=changeme \
-  -v /var/run/docker.sock:/var/run/docker.sock:ro \
+  -v /var/run/docker.sock:/var/run/docker.sock \
   ghcr.io/redth/npm-docker-sync:latest
 ```
 
@@ -314,7 +377,7 @@ docker run -d \
 3. When a container with `npm.*` or `npm-*` labels is detected:
    - The labels are parsed into a proxy configuration
    - A label hash is computed to detect changes
-   - A proxy host is created or updated in Nginx Proxy Manager
+   - A proxy host is created or updated in NPMplus
    - Metadata is added to track automation-managed proxies:
      - `managed_by`: Set to "npm-docker-sync"
      - `npm_instance`: The NPM URL this instance manages
@@ -326,7 +389,7 @@ docker run -d \
    - The proxy host is updated with new configuration
    - If labels are removed, the proxy host is deleted
 5. When a container stops or is removed:
-   - The associated proxy host is deleted from Nginx Proxy Manager
+   - The associated proxy host is deleted from NPMplus
 
 ### Label Change Detection
 
@@ -441,7 +504,7 @@ services:
     build: .
     environment:
       - DOCKER_HOST=unix:///var/run/docker.sock
-      - NPM_URL=http://nginx-proxy-manager:81
+      - NPM_URL=http://npmplus:81
       - NPM_EMAIL=admin@example.com
       - NPM_PASSWORD=changeme
       # Mirror sync configuration
@@ -451,7 +514,7 @@ services:
       - NPM_MIRROR_PASSWORD=changeme
       - NPM_MIRROR_SYNC_INTERVAL=5
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
 ```
 

@@ -14,16 +14,14 @@ This guide helps you test the npm-docker-sync service with a complete local stac
    docker-compose -f docker-compose.test.yml up --build
    ```
 
-3. **Access Nginx Proxy Manager UI:**
-   - URL: http://localhost:81
-   - Default credentials: `admin@example.com` / `changeme`
-   - You'll be prompted to change password on first login
+3. **Access NPMplus UI:**
+   - URL: http://localhost:8981
+   - Default credentials: `admin@example.org` / `changeme`
+     (set via `INITIAL_ADMIN_EMAIL` / `INITIAL_ADMIN_PASSWORD`, matching `NPM_EMAIL` / `NPM_PASSWORD`)
 
-4. **Update .env file** with your new NPM credentials after first login
-
-5. **Restart npm-docker-sync** to use new credentials:
+4. **If you change credentials in the UI**, update `.env` and restart sync:
    ```bash
-   docker-compose -f docker-compose.test.yml restart npm-docker-sync
+   docker compose -f docker-compose.test.yml restart npm-docker-sync
    ```
 
 ## Test Services
@@ -32,13 +30,13 @@ The stack includes 4 test services to demonstrate different scenarios:
 
 ### 1. echo-service (Same Network - Auto-detected)
 - **Domain**: echo.local.test
-- **Network**: On `proxy` network with NPM
+- **Network**: On `proxy` network with NPMplus
 - **Expected**: `npm.proxy.host` auto-detected as `echo-service`
 - **Test**: Should proxy to container via Docker DNS
 
 ### 2. echo-service-2 (Multiple Domains)
 - **Domains**: echo2.local.test, www.echo2.local.test
-- **Network**: On `proxy` network with NPM
+- **Network**: On `proxy` network with NPMplus
 - **Expected**: `npm.proxy.host` auto-detected as `echo-service-2`
 - **Features**: Demonstrates multiple domain names
 
@@ -51,7 +49,7 @@ The stack includes 4 test services to demonstrate different scenarios:
 
 ### 4. echo-manual (Manual Override)
 - **Domain**: manual.local.test
-- **Network**: On `proxy` network with NPM
+- **Network**: On `proxy` network with NPMplus
 - **Expected**: Uses explicitly set `npm.proxy.host: echo-manual`
 - **Features**: Demonstrates manual override
 
@@ -70,17 +68,18 @@ docker-compose -f docker-compose.test.yml logs -f npm-docker-sync
 # - "Created proxy host X for container Y"
 ```
 
-### Check NPM UI
+### Check NPMplus UI
 
-1. Go to http://localhost:81
-2. Navigate to "Proxy Hosts"
-3. You should see 4 proxy hosts created:
+1. Go to http://localhost:8981
+2. Log in with `admin@example.org` / `changeme` (or your `NPM_EMAIL` / `NPM_PASSWORD`)
+3. Navigate to "Proxy Hosts"
+4. You should see proxy hosts created for the labeled echo services:
    - echo.local.test → echo-service:5678
    - echo2.local.test, www.echo2.local.test → echo-service-2:5678
-   - external.local.test → [Docker Host IP]:5679
+   - mbtest.jjagd.net → [Docker Host IP]:5679
    - manual.local.test → echo-manual:5678
 
-4. Check metadata in each proxy host (if NPM UI shows it):
+5. Check metadata in each proxy host (if the UI shows it):
    - `managed_by: npm-docker-sync`
    - `container_id: <container_id>`
    - `created_at: <timestamp>`
@@ -148,21 +147,28 @@ docker-compose -f docker-compose.test.yml up -d echo-service
 # Stop all services
 docker-compose -f docker-compose.test.yml down
 
-# Remove volumes (clears NPM database)
-docker-compose -f docker-compose.test.yml down -v
+# Remove volumes (clears NPMplus database — needed if admin credentials were changed)
+docker compose -f docker-compose.test.yml down -v
 ```
 
 ## Troubleshooting
 
-### NPM Authentication Fails
-- Check NPM is running: `docker ps | grep NGinx-Proxy-Manager`
-- Verify credentials in .env match NPM login
-- Check NPM logs: `docker logs NGinx-Proxy-Manager`
+### NPM / NPMplus Authentication Fails
+- Check NPMplus is running: `docker ps | grep npmplus`
+- Verify credentials in .env match NPMplus login (defaults: `admin@example.org` / `changeme`)
+- Check NPMplus logs: `docker logs npmplus`
+- UI is on host port `8981` when using `docker-compose.test.yml`
 
-### Auto-detection Not Working
-- Verify `NPM_CONTAINER_NAME=NGinx-Proxy-Manager` matches actual container name
+### Auto-detection Not Working / Docker socket Permission denied
+- Verify `NPM_CONTAINER_NAME=npmplus` matches actual container name
+- On **Podman Desktop (macOS)**, `/var/run/docker.sock` is a host symlink and fails inside containers.
+  Set in `.env`:
+  ```bash
+  DOCKER_SOCKET=$HOME/.local/share/containers/podman/machine/podman.sock
+  ```
+  then recreate: `docker compose -f docker-compose.test.yml up --build`
 - Check logs for "Network detection initialized"
-- Verify npm-docker-sync can access Docker socket
+- Verify npm-docker-sync can access the Docker/Podman socket
 
 ### Proxies Not Created
 - Check container has `npm.proxy.domains` and `npm.proxy.port` labels
@@ -171,6 +177,6 @@ docker-compose -f docker-compose.test.yml down -v
 
 ### Can't Reach Services via Domain
 - Ensure /etc/hosts entries added
-- Verify proxy host exists in NPM UI
-- Check NPM logs for routing errors
+- Verify proxy host exists in NPMplus UI (http://localhost:8981)
+- Check NPMplus logs for routing errors: `docker logs npmplus`
 - Test direct access to echo services first (e.g., `curl http://localhost:5679`)

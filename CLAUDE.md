@@ -66,8 +66,9 @@ dotnet build NpmDockerSync.csproj -warnaserror
 - Caches network detection results for performance
 
 **LabelParser** (Configuration Parsing)
-- Parses `npm.` and `npm-` prefixed Docker labels into `ProxyConfiguration` objects
-- Only `npm.proxy.domains` and `npm.proxy.port` are strictly required
+- Parses `npm.` / `npm-` labels and GoDoxy `proxy.*` labels into `ProxyConfiguration` objects
+- Merge rule: GoDoxy first, then `npm.*` overrides overlapping fields
+- Only domains (from `npm.proxy.domains` or `proxy.aliases`) are strictly required for a proxy
 - Supports boolean label values: "true", "1", "yes", "on"
 
 **NginxProxyManagerClient** (NPM API Integration)
@@ -149,6 +150,8 @@ Required:
 Optional:
 - `NPM_CONTAINER_NAME` - Enables automatic `npm.proxy.host` detection
 - `DOCKER_HOST_IP` - Override auto-detected Docker host IP
+- `WEB_UI_PORT` - Embedded UI port (default `8080`)
+- `WEB_UI_TOKEN` - Optional bearer token for `/api/*`
 
 ## Testing Considerations
 

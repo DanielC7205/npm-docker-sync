@@ -16,6 +16,7 @@ public class NginxProxyManagerClient
     private readonly string _email;
     private readonly string _password;
     private string? _token;
+    private string? _sessionCookieHeader;
     private DateTime _tokenExpiry = DateTime.MinValue;
 
     public NginxProxyManagerClient(
@@ -32,14 +33,25 @@ public class NginxProxyManagerClient
         _password = configuration["NPM_PASSWORD"] ?? throw new ArgumentException("NPM_PASSWORD is required");
 
         _httpClient.BaseAddress = new Uri(_baseUrl);
+
+        if (IsTruthy(configuration["NPM_TLS_SKIP_VERIFY"]))
+        {
+            _logger.LogWarning("NPM_TLS_SKIP_VERIFY is enabled — TLS certificate validation is disabled for NPM API calls");
+        }
+
+        _logger.LogInformation("NPM API base URL: {BaseUrl}", _baseUrl);
     }
+
+    private static bool IsTruthy(string? value) =>
+        value?.ToLowerInvariant() is "true" or "1" or "yes" or "on";
 
     private async Task EnsureAuthenticated(CancellationToken cancellationToken)
     {
-        if (!string.IsNullOrEmpty(_token) && DateTime.UtcNow < _tokenExpiry)
+        if ((!string.IsNullOrEmpty(_token) || !string.IsNullOrEmpty(_sessionCookieHeader)) &&
+            DateTime.UtcNow < _tokenExpiry)
             return;
 
-        _logger.LogInformation("Authenticating with Nginx Proxy Manager");
+        _logger.LogInformation("Authenticating with NPMplus / NPM at {BaseUrl}", _baseUrl);
 
         var loginRequest = new
         {
@@ -48,20 +60,103 @@ public class NginxProxyManagerClient
         };
 
         var response = await _httpClient.PostAsJsonAsync("/api/tokens", loginRequest, cancellationToken);
-        response.EnsureSuccessStatusCode();
+        var body = await response.Content.ReadAsStringAsync(cancellationToken);
 
-        var result = await response.Content.ReadFromJsonAsync<TokenResponse>(cancellationToken);
+        if (!response.IsSuccessStatusCode)
+        {
+            _logger.LogError(
+                "NPMplus/NPM authentication failed: {StatusCode} {Reason}. Body: {Body}",
+                (int)response.StatusCode,
+                response.ReasonPhrase,
+                Truncate(body, 500));
+            throw new HttpRequestException(
+                $"NPMplus/NPM authentication failed: {(int)response.StatusCode} {response.ReasonPhrase}. Body: {Truncate(body, 200)}");
+        }
 
-        if (result?.Token == null)
-            throw new Exception("Failed to obtain authentication token");
+        // Classic NPM returns { "token": "...", "expires": "..." }
+        TokenResponse? result = null;
+        try
+        {
+            result = JsonSerializer.Deserialize<TokenResponse>(body, new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Auth response was not classic NPM JSON token payload");
+        }
 
-        _token = result.Token;
-        _tokenExpiry = DateTime.UtcNow.AddHours(23); // Tokens typically last 24 hours
+        // NPMplus sets an HttpOnly session cookie and may omit token from the JSON body
+        var cookies = ExtractCookies(response);
+        _sessionCookieHeader = cookies.Count > 0 ? string.Join("; ", cookies.Select(c => $"{c.Name}={c.Value}")) : null;
 
-        _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", _token);
+        _token = result?.Token
+                 ?? cookies.FirstOrDefault(c =>
+                        c.Name.Contains("token", StringComparison.OrdinalIgnoreCase) &&
+                        c.Value.StartsWith("eyJ", StringComparison.Ordinal)).Value;
 
-        _logger.LogInformation("Successfully authenticated with Nginx Proxy Manager");
+        if (string.IsNullOrEmpty(_token) && string.IsNullOrEmpty(_sessionCookieHeader))
+        {
+            _logger.LogError(
+                "Authentication succeeded but no token/cookie was returned. Body: {Body}; Set-Cookie present: {HasCookies}",
+                Truncate(body, 500),
+                response.Headers.Contains("Set-Cookie"));
+            throw new Exception($"Failed to obtain authentication token/cookie. Response: {Truncate(body, 200)}");
+        }
+
+        if (!string.IsNullOrEmpty(result?.Expires) && DateTime.TryParse(result.Expires, out var expiresAt))
+            _tokenExpiry = expiresAt.ToUniversalTime();
+        else
+            _tokenExpiry = DateTime.UtcNow.AddHours(23);
+
+        ApplyAuthHeaders();
+
+        _logger.LogInformation(
+            "Successfully authenticated with NPMplus / NPM (bearer={HasBearer}, cookie={HasCookie})",
+            !string.IsNullOrEmpty(_token),
+            !string.IsNullOrEmpty(_sessionCookieHeader));
     }
+
+    private void ApplyAuthHeaders()
+    {
+        _httpClient.DefaultRequestHeaders.Authorization = null;
+        _httpClient.DefaultRequestHeaders.Remove("Cookie");
+
+        if (!string.IsNullOrEmpty(_token))
+            _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", _token);
+
+        if (!string.IsNullOrEmpty(_sessionCookieHeader))
+            _httpClient.DefaultRequestHeaders.TryAddWithoutValidation("Cookie", _sessionCookieHeader);
+    }
+
+    private static List<(string Name, string Value)> ExtractCookies(HttpResponseMessage response)
+    {
+        var cookies = new List<(string Name, string Value)>();
+
+        // Prefer NonValidated — HttpClient may hide Set-Cookie from the typed Headers collection
+        if (response.Headers.NonValidated.TryGetValues("Set-Cookie", out var setCookies))
+        {
+            foreach (var setCookie in setCookies)
+            {
+                var firstSegment = setCookie.Split(';', 2)[0];
+                var eq = firstSegment.IndexOf('=');
+                if (eq <= 0)
+                    continue;
+
+                var name = firstSegment[..eq].Trim();
+                var value = firstSegment[(eq + 1)..].Trim();
+                if (name.Length > 0 && value.Length > 0)
+                    cookies.Add((name, value));
+            }
+        }
+
+        return cookies;
+    }
+
+    private static string Truncate(string value, int max) =>
+        string.IsNullOrEmpty(value) ? string.Empty :
+        value.Length <= max ? value : value[..max] + "...";
 
     public async Task<List<ProxyHost>> GetProxyHostsAsync(CancellationToken cancellationToken)
     {
@@ -172,6 +267,68 @@ public class NginxProxyManagerClient
 
         var response = await _httpClient.DeleteAsync($"/api/nginx/proxy-hosts/{hostId}", cancellationToken);
         response.EnsureSuccessStatusCode();
+    }
+
+    public async Task<ProxyHost> SetProxyHostEnabledAsync(int hostId, bool enabled, CancellationToken cancellationToken)
+    {
+        var existing = await GetProxyHostByIdAsync(hostId, cancellationToken)
+            ?? throw new InvalidOperationException($"Proxy host {hostId} not found");
+
+        var meta = existing.Meta != null
+            ? new Dictionary<string, object>(existing.Meta)
+            : new Dictionary<string, object>();
+        meta["ui_disabled"] = !enabled;
+
+        var request = new ProxyHostRequest
+        {
+            DomainNames = existing.DomainNames ?? new List<string>(),
+            ForwardScheme = existing.ForwardScheme ?? "http",
+            ForwardHost = existing.ForwardHost ?? string.Empty,
+            ForwardPort = existing.ForwardPort,
+            AccessListId = existing.AccessListId ?? 0,
+            CertificateId = existing.CertificateId ?? 0,
+            SslForced = existing.SslForced,
+            CachingEnabled = existing.CachingEnabled,
+            BlockExploits = existing.BlockExploits,
+            AdvancedConfig = existing.AdvancedConfig ?? string.Empty,
+            AllowWebsocketUpgrade = existing.AllowWebsocketUpgrade,
+            Http2Support = existing.Http2Support,
+            HstsEnabled = existing.HstsEnabled,
+            HstsSubdomains = existing.HstsSubdomains,
+            Enabled = enabled ? 1 : 0,
+            Meta = meta,
+        };
+
+        return await UpdateProxyHostAsync(hostId, request, cancellationToken);
+    }
+
+    public static bool IsUiDisabled(ProxyHost host)
+    {
+        if (host.Meta == null)
+            return host.Enabled == 0;
+
+        if (host.Meta.TryGetValue("ui_disabled", out var disabled))
+        {
+            var text = disabled?.ToString()?.ToLowerInvariant();
+            if (text is "true" or "1" or "yes" or "on")
+                return true;
+            if (text is "false" or "0" or "no" or "off")
+                return false;
+            if (disabled is bool b)
+                return b;
+            if (disabled is System.Text.Json.JsonElement je)
+            {
+                if (je.ValueKind == System.Text.Json.JsonValueKind.True) return true;
+                if (je.ValueKind == System.Text.Json.JsonValueKind.False) return false;
+                if (je.ValueKind == System.Text.Json.JsonValueKind.String)
+                {
+                    var s = je.GetString()?.ToLowerInvariant();
+                    return s is "true" or "1" or "yes" or "on";
+                }
+            }
+        }
+
+        return host.Enabled == 0;
     }
 
     public async Task<List<Stream>> GetStreamsAsync(CancellationToken cancellationToken)
@@ -461,6 +618,9 @@ public class ProxyHostRequest
 
     [JsonPropertyName("hsts_subdomains")]
     public int HstsSubdomains { get; set; } = 0;
+
+    [JsonPropertyName("enabled")]
+    public int Enabled { get; set; } = 1;
 }
 
 public class Certificate
