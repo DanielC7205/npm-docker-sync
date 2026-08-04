@@ -6,9 +6,17 @@ Share a local workspace port as a temporary NPMplus URL (Funnel-like UX).
 
 1. `npm-docker-sync` running with:
    - `TUNNEL_BASE_DOMAIN` (e.g. `tunnels.example.com`)
-   - `TUNNEL_FORWARD_HOST` or set `npmDockerSync.forwardHost` to your LAN/Tailscale IP
+   - `TUNNEL_FORWARD_HOST` — IP/hostname **NPMplus can reach** for your machine (LAN or Tailscale). On Docker Desktop with NPM on the same host, `host.docker.internal` is used as a last resort.
    - `WEB_UI_TOKEN` or `TUNNEL_API_TOKEN`
 2. NPMplus must be able to reach that host:port (not outbound-only NAT punch-through).
+
+### Why `TUNNEL_FORWARD_HOST (or host override) is required`
+
+Tunnels are reverse proxies: NPMplus dials **your** machine. The API therefore needs a reachable forward host. Set it in:
+
+- Web UI **Settings → Dev tunnels → Forward host**, or
+- Extension setting `npmDockerSync.forwardHost`, or
+- When sharing a port, enter it when prompted (and optionally save it).
 
 ## Install (dev)
 
@@ -24,11 +32,11 @@ In VS Code: **Extensions: Install from Location…** → select this folder, or 
 
 - `npmDockerSync.url` — API base (default `http://localhost:8080`)
 - `npmDockerSync.token` — bearer token
-- `npmDockerSync.forwardHost` — optional host override for tunnels
+- `npmDockerSync.forwardHost` — host NPMplus dials (LAN/Tailscale IP)
 
 ## Commands
 
-- **NPM Docker Sync: Share Port…**
+- **NPM Docker Sync: Share Port…** — picks from listening/common ports or a custom port; default name is the workspace folder; hostname becomes `{name}-{id}.{TUNNEL_BASE_DOMAIN}`
 - **Copy Active Tunnel URL**
 - **Stop Tunnel**
 - **List Tunnels**

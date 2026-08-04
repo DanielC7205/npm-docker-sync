@@ -256,7 +256,7 @@ const SECTIONS: SectionDef[] = [
       {
         key: 'TUNNEL_FORWARD_HOST',
         label: 'Forward host',
-        description: 'Host NPMplus reaches for tunnel traffic (LAN or Tailscale IP).',
+        description: 'IP/hostname NPMplus dials for tunnels (LAN or Tailscale). Required unless Docker Desktop can use host.docker.internal. Causes “TUNNEL_FORWARD_HOST is required” if unset and no extension override.',
         placeholder: '100.x.y.z',
       },
       {

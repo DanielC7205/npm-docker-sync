@@ -527,6 +527,7 @@ public class SyncOrchestrator
                     AuthExempt = routeOverride?.AuthExempt,
                     Hidden = routeOverride?.Hidden == true,
                     HasUiOverride = routeOverride != null,
+                    CandidatePorts = await _networkService.ListCandidatePortsAsync(containerId, cancellationToken),
                     KomodoUrl = komodo?.Url,
                     KomodoResourceType = komodo?.ResourceType,
                     KomodoResourceName = komodo?.ResourceName,
@@ -1210,6 +1211,7 @@ public class RouteInfo
     public bool? AuthExempt { get; set; }
     public bool Hidden { get; set; }
     public bool HasUiOverride { get; set; }
+    public List<int> CandidatePorts { get; set; } = new();
     public string? KomodoUrl { get; set; }
     public string? KomodoResourceType { get; set; }
     public string? KomodoResourceName { get; set; }

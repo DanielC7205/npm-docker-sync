@@ -38,17 +38,23 @@ public class TunnelService
         if (string.IsNullOrWhiteSpace(baseDomain))
             throw new InvalidOperationException("TUNNEL_BASE_DOMAIN is not configured");
 
-        var forwardHost = host
+        var forwardHost = (host
             ?? _settings.Get("TUNNEL_FORWARD_HOST")
-            ?? _settings.Get("DOCKER_HOST_IP");
+            ?? _settings.Get("DOCKER_HOST_IP")
+            ?? "host.docker.internal")?.Trim();
+
         if (string.IsNullOrWhiteSpace(forwardHost))
-            throw new InvalidOperationException("TUNNEL_FORWARD_HOST (or host override) is required");
+        {
+            throw new InvalidOperationException(
+                "TUNNEL_FORWARD_HOST is required. Set it in Settings to an IP/hostname NPMplus can reach " +
+                "(LAN or Tailscale), or set npmDockerSync.forwardHost in the VS Code extension.");
+        }
 
         var ttl = ttlMinutes ?? _settings.GetInt("TUNNEL_DEFAULT_TTL_MINUTES", 120);
         if (ttl < 5) ttl = 5;
         if (ttl > 60 * 24 * 7) ttl = 60 * 24 * 7;
 
-        var slug = GenerateSlug();
+        var slug = BuildSlug(label);
         var domain = $"{slug}.{baseDomain}";
         var forwardScheme = string.IsNullOrWhiteSpace(scheme) ? "http" : scheme.Trim().ToLowerInvariant();
 
@@ -167,6 +173,27 @@ public class TunnelService
                 _logger.LogWarning(ex, "Failed to expire tunnel {Id}", tunnel.Id);
             }
         }
+    }
+
+    private static string BuildSlug(string? label)
+    {
+        Span<byte> bytes = stackalloc byte[3];
+        RandomNumberGenerator.Fill(bytes);
+        var suffix = Convert.ToHexString(bytes).ToLowerInvariant();
+
+        if (string.IsNullOrWhiteSpace(label))
+            return GenerateSlug();
+
+        var baseSlug = System.Text.RegularExpressions.Regex.Replace(
+            label.Trim().ToLowerInvariant(),
+            @"[^a-z0-9]+",
+            "-").Trim('-');
+        if (baseSlug.Length > 36)
+            baseSlug = baseSlug[..36].TrimEnd('-');
+        if (string.IsNullOrEmpty(baseSlug))
+            return GenerateSlug();
+
+        return $"{baseSlug}-{suffix}";
     }
 
     private static string GenerateSlug()

@@ -246,8 +246,19 @@ export function RouteEditDialog({
               <Input value={host} onChange={(e) => setHost(e.target.value)} placeholder="container-name" />
             </Field>
             <div className="grid grid-cols-2 gap-3">
-              <Field label="Port" description="Container listen port.">
-                <Input value={port} onChange={(e) => setPort(e.target.value)} inputMode="numeric" />
+              <Field
+                label="Port"
+                description={
+                  (route.candidatePorts?.length ?? 0) > 0
+                    ? `Detected from EXPOSE / env (no host publish needed): ${route.candidatePorts!.join(', ')}. Or type your own.`
+                    : 'Container listen port. Prefer EXPOSE or PORT env so detection works without -p publish.'
+                }
+              >
+                <PortCombobox
+                  value={port}
+                  onChange={setPort}
+                  candidates={route.candidatePorts ?? []}
+                />
               </Field>
               <Field label="Scheme" description="http or https to the upstream.">
                 <select
@@ -391,6 +402,49 @@ function Field({
       <Label className="text-sm">{label}</Label>
       {description && <p className="text-xs leading-snug text-muted-foreground">{description}</p>}
       {children}
+    </div>
+  )
+}
+
+function PortCombobox({
+  value,
+  onChange,
+  candidates,
+}: {
+  value: string
+  onChange: (v: string) => void
+  candidates: number[]
+}) {
+  const listId = 'upstream-port-options'
+  const options = [...new Set(candidates)].sort((a, b) => a - b)
+  return (
+    <div className="space-y-1.5">
+      {options.length > 0 && (
+        <select
+          className="flex h-9 w-full rounded-md border bg-transparent px-3 text-sm"
+          value={options.some((p) => String(p) === value) ? value : ''}
+          onChange={(e) => {
+            if (e.target.value) onChange(e.target.value)
+          }}
+        >
+          <option value="">Pick detected port…</option>
+          {options.map((p) => (
+            <option key={p} value={String(p)}>{p}</option>
+          ))}
+        </select>
+      )}
+      <Input
+        list={listId}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        inputMode="numeric"
+        placeholder={options[0] ? String(options[0]) : '8080'}
+      />
+      <datalist id={listId}>
+        {options.map((p) => (
+          <option key={p} value={String(p)} />
+        ))}
+      </datalist>
     </div>
   )
 }

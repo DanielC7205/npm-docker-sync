@@ -201,52 +201,135 @@ public class DockerNetworkService
 
     public async Task<int?> InferForwardPort(string containerId, CancellationToken cancellationToken)
     {
+        var candidates = await ListCandidatePortsAsync(containerId, cancellationToken);
+        if (candidates.Count == 0)
+            return null;
+
+        var preferred = PreferPort(candidates);
         try
         {
             var container = await _dockerClient.Containers.InspectContainerAsync(containerId, cancellationToken);
             var containerName = container.Name.TrimStart('/');
+            _logger.LogInformation("Container {ContainerName} auto-detected port: {Port} (from {Count} candidate(s))",
+                containerName, preferred, candidates.Count);
+        }
+        catch
+        {
+            // ignore name lookup
+        }
 
-            // Get exposed ports from container config
-            if (container.Config?.ExposedPorts != null && container.Config.ExposedPorts.Count > 0)
+        return preferred;
+    }
+
+    /// <summary>
+    /// Candidate container-internal ports — does not require host port publishing (-p).
+    /// Sources: EXPOSE, runtime port map keys, common env vars (PORT, …), image EXPOSE.
+    /// </summary>
+    public async Task<List<int>> ListCandidatePortsAsync(string containerId, CancellationToken cancellationToken)
+    {
+        var ports = new SortedSet<int>();
+        try
+        {
+            var container = await _dockerClient.Containers.InspectContainerAsync(containerId, cancellationToken);
+
+            AddExposedPortKeys(ports, container.Config?.ExposedPorts?.Keys);
+            AddExposedPortKeys(ports, container.NetworkSettings?.Ports?.Keys);
+            AddPortsFromEnv(ports, container.Config?.Env);
+
+            // Image metadata often has EXPOSE even when the running config was stripped
+            if (ports.Count == 0 && !string.IsNullOrWhiteSpace(container.Image))
             {
-                // Parse the first exposed port (format: "80/tcp" or "443/tcp")
-                var firstPort = container.Config.ExposedPorts.Keys.FirstOrDefault();
-                if (firstPort != null)
+                try
                 {
-                    var portStr = firstPort.Split('/')[0];
-                    if (int.TryParse(portStr, out var port))
-                    {
-                        _logger.LogInformation("Container {ContainerName} auto-detected port: {Port} from exposed ports",
-                            containerName, port);
-                        return port;
-                    }
+                    var image = await _dockerClient.Images.InspectImageAsync(container.Image, cancellationToken);
+                    AddExposedPortKeys(ports, image.Config?.ExposedPorts?.Keys);
+                    AddPortsFromEnv(ports, image.Config?.Env);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "Could not inspect image for port candidates on {ContainerId}", containerId);
                 }
             }
 
-            // Fallback: Check port bindings (for -p mappings)
-            if (container.NetworkSettings?.Ports != null && container.NetworkSettings.Ports.Count > 0)
+            if (ports.Count == 0)
             {
-                var firstPortBinding = container.NetworkSettings.Ports.Keys.FirstOrDefault();
-                if (firstPortBinding != null)
-                {
-                    var portStr = firstPortBinding.Split('/')[0];
-                    if (int.TryParse(portStr, out var port))
-                    {
-                        _logger.LogInformation("Container {ContainerName} auto-detected port: {Port} from port bindings",
-                            containerName, port);
-                        return port;
-                    }
-                }
+                var name = container.Name.TrimStart('/');
+                _logger.LogWarning(
+                    "Container {ContainerName} has no EXPOSE/env/image ports. " +
+                    "Add EXPOSE in the Dockerfile, set proxy.port / npm.proxy.port, or set PORT in the container env.",
+                    name);
             }
-
-            _logger.LogWarning("Container {ContainerName} has no exposed ports or port bindings", containerName);
-            return null;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error inferring forward port for container {ContainerId}", containerId);
-            return null;
+            _logger.LogError(ex, "Error listing candidate ports for container {ContainerId}", containerId);
         }
+
+        return ports.ToList();
+    }
+
+    private static void AddExposedPortKeys(SortedSet<int> ports, IEnumerable<string>? keys)
+    {
+        if (keys == null)
+            return;
+
+        foreach (var key in keys)
+        {
+            var portStr = key.Split('/')[0];
+            if (int.TryParse(portStr, out var port) && port is > 0 and < 65536)
+                ports.Add(port);
+        }
+    }
+
+    private static void AddPortsFromEnv(SortedSet<int> ports, IList<string>? env)
+    {
+        if (env == null)
+            return;
+
+        foreach (var entry in env)
+        {
+            var eq = entry.IndexOf('=');
+            if (eq <= 0)
+                continue;
+
+            var key = entry[..eq];
+            if (!IsPortEnvKey(key))
+                continue;
+
+            var value = entry[(eq + 1)..].Trim();
+            // Support "8080" or "0.0.0.0:8080" or "tcp://:8080"
+            var lastColon = value.LastIndexOf(':');
+            if (lastColon >= 0 && lastColon < value.Length - 1)
+                value = value[(lastColon + 1)..];
+
+            if (int.TryParse(value, out var port) && port is > 0 and < 65536)
+                ports.Add(port);
+        }
+    }
+
+    private static bool IsPortEnvKey(string key) =>
+        key.Equals("PORT", StringComparison.OrdinalIgnoreCase) ||
+        key.Equals("HTTP_PORT", StringComparison.OrdinalIgnoreCase) ||
+        key.Equals("HTTPS_PORT", StringComparison.OrdinalIgnoreCase) ||
+        key.Equals("SERVER_PORT", StringComparison.OrdinalIgnoreCase) ||
+        key.Equals("APP_PORT", StringComparison.OrdinalIgnoreCase) ||
+        key.Equals("WEB_PORT", StringComparison.OrdinalIgnoreCase) ||
+        key.Equals("LISTEN_PORT", StringComparison.OrdinalIgnoreCase) ||
+        key.EndsWith("_PORT", StringComparison.OrdinalIgnoreCase);
+
+    private static int PreferPort(IReadOnlyList<int> candidates)
+    {
+        // Prefer typical HTTP app ports over high ephemeral / DB ports
+        int[] preferred = [80, 8080, 3000, 8000, 5000, 443, 8443, 5173, 4200, 8096];
+        foreach (var p in preferred)
+        {
+            if (candidates.Contains(p))
+                return p;
+        }
+
+        // Prefer ports in common app range over databases (5432, 6379, …)
+        var appish = candidates.FirstOrDefault(p => p is >= 80 and <= 9999 && p is not (5432 or 3306 or 6379 or 27017 or 11211));
+        return appish != 0 ? appish : candidates[0];
     }
 
     public string? GetDockerHostIp() => _detectedDockerHostIp;

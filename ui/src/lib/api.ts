@@ -9,6 +9,7 @@ export interface RouteInfo {
   icon?: string | null
   category?: string | null
   domains: string[]
+  candidatePorts?: number[]
   forwardHost?: string | null
   forwardPort?: number | null
   forwardScheme?: string | null
