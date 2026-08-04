@@ -6,34 +6,60 @@ public class CertificateService
 {
     private readonly ILogger<CertificateService> _logger;
     private readonly NginxProxyManagerClient _npmClient;
+    private readonly SettingsStore _settings;
     private List<Certificate>? _cachedCertificates;
     private DateTime _cacheExpiry = DateTime.MinValue;
     private readonly TimeSpan _cacheLifetime = TimeSpan.FromMinutes(5);
 
     public CertificateService(
         ILogger<CertificateService> logger,
-        NginxProxyManagerClient npmClient)
+        NginxProxyManagerClient npmClient,
+        SettingsStore settings)
     {
         _logger = logger;
         _npmClient = npmClient;
+        _settings = settings;
     }
 
+    public async Task<List<CertificateInfo>> ListCertificatesAsync(CancellationToken cancellationToken)
+    {
+        var certs = await GetCertificatesAsync(cancellationToken);
+        return certs.Select(c => new CertificateInfo
+        {
+            Id = c.Id,
+            NiceName = c.NiceName,
+            Provider = c.Provider,
+            DomainNames = c.DomainNames ?? new List<string>(),
+            ExpiresOn = c.ExpiresOn,
+        }).OrderBy(c => c.NiceName ?? c.Id.ToString()).ToList();
+    }
+
+    /// <summary>
+    /// Resolve cert: explicit domain map → NPM name/domain match → optional default cert id.
+    /// </summary>
     public async Task<int?> FindMatchingCertificateAsync(List<string> domainNames, CancellationToken cancellationToken)
     {
         if (domainNames == null || domainNames.Count == 0)
             return null;
+
+        var mapped = ResolveFromDomainMap(domainNames);
+        if (mapped.HasValue)
+        {
+            _logger.LogInformation("Using CERT_DOMAIN_MAP certificate {CertId} for domains: {Domains}",
+                mapped.Value, string.Join(", ", domainNames));
+            return mapped.Value;
+        }
 
         var certificates = await GetCertificatesAsync(cancellationToken);
 
         if (certificates.Count == 0)
         {
             _logger.LogDebug("No certificates available in NPM");
-            return null;
+            return ResolveDefaultCertificateId();
         }
 
         var primaryDomain = domainNames[0];
 
-        // Strategy 1: Exact match - certificate covers all requested domains
         var exactMatch = FindExactMatch(certificates, domainNames);
         if (exactMatch != null)
         {
@@ -42,7 +68,6 @@ public class CertificateService
             return exactMatch.Id;
         }
 
-        // Strategy 2: Primary domain match - certificate covers at least the primary domain
         var primaryMatch = FindPrimaryDomainMatch(certificates, primaryDomain);
         if (primaryMatch != null)
         {
@@ -51,7 +76,6 @@ public class CertificateService
             return primaryMatch.Id;
         }
 
-        // Strategy 3: Wildcard match - certificate with wildcard covers the domain
         var wildcardMatch = FindWildcardMatch(certificates, primaryDomain);
         if (wildcardMatch != null)
         {
@@ -60,13 +84,84 @@ public class CertificateService
             return wildcardMatch.Id;
         }
 
+        var fallback = ResolveDefaultCertificateId();
+        if (fallback.HasValue)
+        {
+            _logger.LogInformation("Using NPM_PROXY_DEFAULT_CERTIFICATE_ID {CertId} for domains: {Domains}",
+                fallback.Value, string.Join(", ", domainNames));
+            return fallback;
+        }
+
         _logger.LogWarning("No matching certificate found for domains: {Domains}", string.Join(", ", domainNames));
+        return null;
+    }
+
+    /// <summary>
+    /// CERT_DOMAIN_MAP lines: pattern=id  (e.g. *.example.com=3 or app.example.com=5)
+    /// Separators: newline, semicolon, or comma between entries.
+    /// </summary>
+    public int? ResolveFromDomainMap(IEnumerable<string> domainNames)
+    {
+        var map = ParseDomainMap(_settings.Get("CERT_DOMAIN_MAP"));
+        if (map.Count == 0)
+            return null;
+
+        foreach (var domain in domainNames)
+        {
+            if (string.IsNullOrWhiteSpace(domain))
+                continue;
+
+            // Exact pattern first
+            if (map.TryGetValue(domain.Trim(), out var exactId))
+                return exactId;
+
+            // Wildcard patterns in map (*.example.com)
+            foreach (var (pattern, certId) in map)
+            {
+                if (pattern.StartsWith("*.", StringComparison.Ordinal) && MatchesWildcard(domain, pattern))
+                    return certId;
+            }
+        }
+
+        return null;
+    }
+
+    public static Dictionary<string, int> ParseDomainMap(string? raw)
+    {
+        var result = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(raw))
+            return result;
+
+        var entries = raw.Split(new[] { '\n', '\r', ';', ',' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        foreach (var entry in entries)
+        {
+            var sep = entry.IndexOf('=');
+            if (sep < 0)
+                sep = entry.IndexOf(':');
+            if (sep <= 0)
+                continue;
+
+            var pattern = entry[..sep].Trim();
+            var idPart = entry[(sep + 1)..].Trim();
+            if (string.IsNullOrEmpty(pattern) || !int.TryParse(idPart, out var id) || id <= 0)
+                continue;
+
+            result[pattern] = id;
+        }
+
+        return result;
+    }
+
+    private int? ResolveDefaultCertificateId()
+    {
+        var raw = _settings.Get("NPM_PROXY_DEFAULT_CERTIFICATE_ID");
+        if (int.TryParse(raw, out var id) && id > 0)
+            return id;
         return null;
     }
 
     private async Task<List<Certificate>> GetCertificatesAsync(CancellationToken cancellationToken)
     {
-        // Return cached certificates if still valid
         if (_cachedCertificates != null && DateTime.UtcNow < _cacheExpiry)
         {
             _logger.LogDebug("Using cached certificates list ({Count} certificates)", _cachedCertificates.Count);
@@ -77,7 +172,6 @@ public class CertificateService
         _cachedCertificates = await _npmClient.GetCertificatesAsync(cancellationToken);
         _cacheExpiry = DateTime.UtcNow.Add(_cacheLifetime);
 
-        // Filter out deleted certificates
         _cachedCertificates = _cachedCertificates
             .Where(c => c.IsDeleted == 0)
             .ToList();
@@ -104,14 +198,6 @@ public class CertificateService
 
     private Certificate? FindWildcardMatch(List<Certificate> certificates, string domain)
     {
-        // Extract the root domain (e.g., "app.example.com" -> "example.com")
-        var parts = domain.Split('.');
-        if (parts.Length < 2)
-            return null;
-
-        var rootDomain = string.Join('.', parts.TakeLast(2));
-        var wildcardPattern = $"*.{rootDomain}";
-
         return certificates.FirstOrDefault(cert =>
             cert.DomainNames != null &&
             cert.DomainNames.Any(certDomain =>
@@ -126,7 +212,7 @@ public class CertificateService
         if (!wildcardPattern.StartsWith("*."))
             return false;
 
-        var wildcardRoot = wildcardPattern[2..]; // Remove "*."
+        var wildcardRoot = wildcardPattern[2..];
         return domain.EndsWith(wildcardRoot, StringComparison.OrdinalIgnoreCase) &&
                (domain.Length == wildcardRoot.Length || domain[domain.Length - wildcardRoot.Length - 1] == '.');
     }
@@ -136,4 +222,13 @@ public class CertificateService
         _logger.LogDebug("Invalidating certificate cache");
         _cacheExpiry = DateTime.MinValue;
     }
+}
+
+public class CertificateInfo
+{
+    public int Id { get; set; }
+    public string? NiceName { get; set; }
+    public string? Provider { get; set; }
+    public List<string> DomainNames { get; set; } = new();
+    public string? ExpiresOn { get; set; }
 }

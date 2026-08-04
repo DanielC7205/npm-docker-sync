@@ -1,86 +1,344 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import {
+  Check,
+  KeyRound,
+  Lock,
+  Network,
+  Save,
+  Search,
+  Server,
+  Shield,
+  ShieldCheck,
+} from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
-import { fetchSettings, saveSettings, type AppSettings, type AuthStatus } from '@/lib/api'
+import { cn } from '@/lib/utils'
+import {
+  fetchCertificates,
+  fetchSettings,
+  saveSettings,
+  type AppSettings,
+  type AuthStatus,
+  type CertificateInfo,
+} from '@/lib/api'
 
-const SECTIONS: { title: string; keys: { key: string; label: string; secret?: boolean; bool?: boolean }[] }[] = [
+type FieldDef = {
+  key: string
+  label: string
+  description: string
+  secret?: boolean
+  bool?: boolean
+  placeholder?: string
+}
+
+type SectionDef = {
+  id: string
+  title: string
+  description: string
+  icon: typeof Server
+  keys: FieldDef[]
+}
+
+const SECTIONS: SectionDef[] = [
   {
-    title: 'NPM Connection',
+    id: 'npm',
+    title: 'NPM connection',
+    description: 'How this service talks to Nginx Proxy Manager / NPMplus.',
+    icon: Server,
     keys: [
-      { key: 'NPM_URL', label: 'NPM URL' },
-      { key: 'NPM_EMAIL', label: 'Email' },
-      { key: 'NPM_PASSWORD', label: 'Password', secret: true },
-      { key: 'NPM_CONTAINER_NAME', label: 'NPM container name' },
-      { key: 'DOCKER_HOST_IP', label: 'Docker host IP' },
-      { key: 'NPM_TLS_SKIP_VERIFY', label: 'Skip TLS verify', bool: true },
-      { key: 'NPM_ADOPT_EXISTING', label: 'Adopt existing hosts', bool: true },
+      {
+        key: 'NPM_URL',
+        label: 'NPM URL',
+        description: 'Base URL of the NPM/NPMplus API, including scheme and port if needed.',
+        placeholder: 'https://npm.example.com:81',
+      },
+      {
+        key: 'NPM_EMAIL',
+        label: 'Email',
+        description: 'Admin email used to authenticate with the NPM API.',
+      },
+      {
+        key: 'NPM_PASSWORD',
+        label: 'Password',
+        description: 'Admin password for the NPM API. Leave blank when saving to keep the current value.',
+        secret: true,
+      },
+      {
+        key: 'NPM_CONTAINER_NAME',
+        label: 'NPM container name',
+        description: 'Docker container name for NPM. Enables automatic forward-host inference via shared networks.',
+        placeholder: 'npmplus',
+      },
+      {
+        key: 'DOCKER_HOST_IP',
+        label: 'Docker host IP',
+        description: 'Override for the host IP used when a container is not on the same network as NPM.',
+        placeholder: '172.17.0.1',
+      },
+      {
+        key: 'NPM_TLS_SKIP_VERIFY',
+        label: 'Skip TLS verify',
+        description: 'Disable certificate validation for NPM API calls (self-signed or HTTPS redirects).',
+        bool: true,
+      },
+      {
+        key: 'NPM_ADOPT_EXISTING',
+        label: 'Adopt existing hosts',
+        description: 'If a proxy already exists for a domain, take ownership instead of failing create.',
+        bool: true,
+      },
     ],
   },
   {
-    title: 'Proxy defaults',
+    id: 'proxy',
+    title: 'Proxy & auto-bridge',
+    description: 'Defaults for synced proxies and unlabeled containers with exposed ports.',
+    icon: Network,
     keys: [
-      { key: 'PROXY_BASE_DOMAIN', label: 'Base domain for short aliases (e.g. example.com)' },
-      { key: 'AUTO_BRIDGE_EXPOSED', label: 'Auto-bridge containers with exposed ports', bool: true },
-      { key: 'AUTO_BRIDGE_EXCLUDE', label: 'Auto-bridge name excludes (comma-separated)' },
-      { key: 'NPM_PROXY_SSL_FORCE', label: 'Force SSL (default TLS)', bool: true },
-      { key: 'NPM_PROXY_WEBSOCKETS', label: 'WebSockets', bool: true },
-      { key: 'NPM_PROXY_HTTP2', label: 'HTTP/2', bool: true },
-      { key: 'NPM_PROXY_HSTS', label: 'HSTS', bool: true },
-      { key: 'NPM_PROXY_BLOCK_EXPLOITS', label: 'Block exploits', bool: true },
+      {
+        key: 'PROXY_BASE_DOMAIN',
+        label: 'Base domain',
+        description: 'Expands short aliases (home → home.example.com) and auto-bridge hostnames.',
+        placeholder: 'example.com',
+      },
+      {
+        key: 'AUTO_BRIDGE_EXPOSED',
+        label: 'Auto-bridge exposed ports',
+        description: 'Create proxies for running containers that expose a port but have no npm/proxy labels. Requires base domain.',
+        bool: true,
+      },
+      {
+        key: 'AUTO_BRIDGE_EXCLUDE',
+        label: 'Auto-bridge excludes',
+        description: 'Comma-separated name substrings to skip (e.g. npmplus, npm-docker-sync).',
+        placeholder: 'npmplus,npm-docker-sync,nginx-proxy-manager',
+      },
+      {
+        key: 'NPM_PROXY_SSL_FORCE',
+        label: 'Force SSL',
+        description: 'Default HTTPS redirect for new/updated proxies when labels omit ssl.force.',
+        bool: true,
+      },
+      {
+        key: 'NPM_PROXY_WEBSOCKETS',
+        label: 'WebSockets',
+        description: 'Allow WebSocket upgrades by default on synced proxies.',
+        bool: true,
+      },
+      {
+        key: 'NPM_PROXY_HTTP2',
+        label: 'HTTP/2',
+        description: 'Enable HTTP/2 support by default on synced proxies.',
+        bool: true,
+      },
+      {
+        key: 'NPM_PROXY_HSTS',
+        label: 'HSTS',
+        description: 'Send Strict-Transport-Security headers by default when SSL is forced.',
+        bool: true,
+      },
+      {
+        key: 'NPM_PROXY_BLOCK_EXPLOITS',
+        label: 'Block exploits',
+        description: 'Enable NPM’s common exploit blocking rules by default.',
+        bool: true,
+      },
     ],
   },
   {
-    title: 'Route OAuth (NPMplus auth_request)',
+    id: 'tls',
+    title: 'TLS certificates',
+    description: 'Certificates from NPMplus, plus domain defaults used during sync and auto-bridge.',
+    icon: ShieldCheck,
+    keys: [],
+  },
+  {
+    id: 'auth-request',
+    title: 'Route OAuth',
+    description: 'NPMplus auth_request defaults applied to proxied apps.',
+    icon: Shield,
     keys: [
-      { key: 'AUTH_REQUEST_DEFAULT', label: 'Default provider (none/authentik/oauth2proxy/…)' },
-      { key: 'AUTH_REQUEST_UPSTREAM', label: 'Upstream override' },
+      {
+        key: 'AUTH_REQUEST_DEFAULT',
+        label: 'Default provider',
+        description: 'none, authentik, authentik-send-basic-auth, oauth2proxy, authelia, tinyauth, or anubis.',
+        placeholder: 'none',
+      },
+      {
+        key: 'AUTH_REQUEST_UPSTREAM',
+        label: 'Upstream override',
+        description: 'Optional upstream URL for auth_request when the provider needs a custom endpoint.',
+      },
     ],
   },
   {
-    title: 'Web UI Auth',
+    id: 'web-auth',
+    title: 'Web UI auth',
+    description: 'Protect settings writes and optional OIDC login for the dashboard.',
+    icon: Lock,
     keys: [
-      { key: 'WEB_UI_TOKEN', label: 'API bearer token', secret: true },
-      { key: 'OIDC_AUTHORITY', label: 'OIDC authority' },
-      { key: 'OIDC_CLIENT_ID', label: 'OIDC client ID' },
-      { key: 'OIDC_CLIENT_SECRET', label: 'OIDC client secret', secret: true },
-      { key: 'OIDC_SCOPES', label: 'OIDC scopes' },
+      {
+        key: 'WEB_UI_TOKEN',
+        label: 'API bearer token',
+        description: 'Bearer token for the Web UI and settings API. Leave blank when saving to keep the current value.',
+        secret: true,
+      },
+      {
+        key: 'OIDC_AUTHORITY',
+        label: 'OIDC authority',
+        description: 'Issuer URL for OpenID Connect. Must also be set at container start for middleware registration.',
+        placeholder: 'https://auth.example.com/application/o/npm-docker-sync/',
+      },
+      {
+        key: 'OIDC_CLIENT_ID',
+        label: 'OIDC client ID',
+        description: 'OAuth/OIDC client ID registered with your identity provider.',
+      },
+      {
+        key: 'OIDC_CLIENT_SECRET',
+        label: 'OIDC client secret',
+        description: 'Client secret for the OIDC app. Leave blank when saving to keep the current value.',
+        secret: true,
+      },
+      {
+        key: 'OIDC_SCOPES',
+        label: 'OIDC scopes',
+        description: 'Space-separated scopes requested during login.',
+        placeholder: 'openid profile email',
+      },
     ],
   },
   {
+    id: 'komodo',
     title: 'Komodo',
+    description: 'Deep links from apps to matching Komodo resources.',
+    icon: KeyRound,
     keys: [
-      { key: 'KOMODO_URL', label: 'Komodo URL' },
-      { key: 'KOMODO_SERVER', label: 'Server id/name' },
-      { key: 'KOMODO_API_KEY', label: 'API key' },
-      { key: 'KOMODO_API_SECRET', label: 'API secret', secret: true },
+      {
+        key: 'KOMODO_URL',
+        label: 'Komodo URL',
+        description: 'Base URL of your Komodo instance.',
+        placeholder: 'https://komodo.example.com',
+      },
+      {
+        key: 'KOMODO_SERVER',
+        label: 'Server',
+        description: 'Komodo server id or name used when resolving container resources.',
+      },
+      {
+        key: 'KOMODO_API_KEY',
+        label: 'API key',
+        description: 'Komodo API key for resource lookups.',
+      },
+      {
+        key: 'KOMODO_API_SECRET',
+        label: 'API secret',
+        description: 'Komodo API secret. Leave blank when saving to keep the current value.',
+        secret: true,
+      },
     ],
   },
   {
+    id: 'tunnels',
     title: 'Dev tunnels',
+    description: 'Temporary public proxies for local ports (VS Code extension / API).',
+    icon: Network,
     keys: [
-      { key: 'TUNNEL_BASE_DOMAIN', label: 'Base domain (e.g. tunnels.example.com)' },
-      { key: 'TUNNEL_FORWARD_HOST', label: 'Default forward host (LAN/Tailscale IP)' },
-      { key: 'TUNNEL_DEFAULT_TTL_MINUTES', label: 'Default TTL (minutes)' },
-      { key: 'TUNNEL_REQUIRE_AUTH', label: 'Require route OAuth on tunnels', bool: true },
-      { key: 'TUNNEL_API_TOKEN', label: 'Tunnel API token', secret: true },
+      {
+        key: 'TUNNEL_BASE_DOMAIN',
+        label: 'Base domain',
+        description: 'Domain under which tunnel hostnames are created (e.g. tunnels.example.com).',
+        placeholder: 'tunnels.example.com',
+      },
+      {
+        key: 'TUNNEL_FORWARD_HOST',
+        label: 'Forward host',
+        description: 'Host NPMplus reaches for tunnel traffic (LAN or Tailscale IP).',
+        placeholder: '100.x.y.z',
+      },
+      {
+        key: 'TUNNEL_DEFAULT_TTL_MINUTES',
+        label: 'Default TTL (minutes)',
+        description: 'How long new tunnels live before automatic cleanup.',
+        placeholder: '120',
+      },
+      {
+        key: 'TUNNEL_REQUIRE_AUTH',
+        label: 'Require route OAuth',
+        description: 'Apply the default auth_request provider to tunnel proxy hosts.',
+        bool: true,
+      },
+      {
+        key: 'TUNNEL_API_TOKEN',
+        label: 'Tunnel API token',
+        description: 'Bearer token for tunnel create/list/delete. Leave blank when saving to keep the current value.',
+        secret: true,
+      },
     ],
   },
 ]
 
+const TLS_SEARCH_TERMS = [
+  'tls',
+  'certificate',
+  'cert',
+  'ssl',
+  'domain map',
+  'CERT_DOMAIN_MAP',
+  'NPM_PROXY_DEFAULT_CERTIFICATE_ID',
+]
+
+function certLabel(c: CertificateInfo) {
+  const name = c.niceName || `Certificate #${c.id}`
+  const domains = c.domainNames?.length
+    ? ` (${c.domainNames.slice(0, 2).join(', ')}${c.domainNames.length > 2 ? '…' : ''})`
+    : ''
+  return `#${c.id} — ${name}${domains}`
+}
+
+function parseDomainMap(raw: string): { pattern: string; certId: string }[] {
+  if (!raw.trim()) return []
+  return raw
+    .split(/[\n\r;,]+/)
+    .map((e) => e.trim())
+    .filter(Boolean)
+    .map((entry) => {
+      const sep = entry.includes('=') ? entry.indexOf('=') : entry.indexOf(':')
+      if (sep <= 0) return { pattern: entry, certId: '' }
+      return { pattern: entry.slice(0, sep).trim(), certId: entry.slice(sep + 1).trim() }
+    })
+}
+
+function serializeDomainMap(rows: { pattern: string; certId: string }[]) {
+  return rows
+    .filter((r) => r.pattern.trim() && r.certId.trim())
+    .map((r) => `${r.pattern.trim()}=${r.certId.trim()}`)
+    .join('\n')
+}
+
+function matchesQuery(haystack: string, query: string) {
+  return haystack.toLowerCase().includes(query.toLowerCase())
+}
+
 export function SettingsPage({ auth }: { auth: AuthStatus | null }) {
   const [settings, setSettings] = useState<AppSettings>({})
   const [draft, setDraft] = useState<Record<string, string>>({})
+  const [certs, setCerts] = useState<CertificateInfo[]>([])
+  const [domainRows, setDomainRows] = useState<{ pattern: string; certId: string }[]>([])
   const [error, setError] = useState<string | null>(null)
   const [saved, setSaved] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [query, setQuery] = useState('')
+  const [activeSection, setActiveSection] = useState(SECTIONS[0].id)
 
   useEffect(() => {
-    void fetchSettings()
-      .then((s) => {
+    void Promise.all([fetchSettings(), fetchCertificates().catch(() => [] as CertificateInfo[])])
+      .then(([s, c]) => {
         setSettings(s)
+        setCerts(c)
         const d: Record<string, string> = {}
         for (const section of SECTIONS) {
           for (const field of section.keys) {
@@ -93,10 +351,60 @@ export function SettingsPage({ auth }: { auth: AuthStatus | null }) {
             }
           }
         }
+        d.NPM_PROXY_DEFAULT_CERTIFICATE_ID = String(s.NPM_PROXY_DEFAULT_CERTIFICATE_ID ?? '')
+        d.CERT_DOMAIN_MAP = String(s.CERT_DOMAIN_MAP ?? '')
         setDraft(d)
+        setDomainRows(parseDomainMap(d.CERT_DOMAIN_MAP))
       })
       .catch((e) => setError(e instanceof Error ? e.message : 'Failed to load'))
   }, [])
+
+  useEffect(() => {
+    const ids = SECTIONS.map((s) => s.id)
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const visible = entries
+          .filter((e) => e.isIntersecting)
+          .sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0]
+        if (visible?.target.id) {
+          const id = visible.target.id.replace(/^settings-/, '')
+          if (ids.includes(id)) setActiveSection(id)
+        }
+      },
+      { rootMargin: '-20% 0px -60% 0px', threshold: [0.1, 0.4, 0.7] },
+    )
+    for (const id of ids) {
+      const el = document.getElementById(`settings-${id}`)
+      if (el) observer.observe(el)
+    }
+    return () => observer.disconnect()
+  }, [query])
+
+  const filteredSections = useMemo(() => {
+    const q = query.trim()
+    if (!q) return SECTIONS.map((s) => ({ ...s, keys: s.keys }))
+
+    return SECTIONS.map((section) => {
+      const sectionHit =
+        matchesQuery(section.title, q) ||
+        matchesQuery(section.description, q) ||
+        matchesQuery(section.id, q)
+
+      if (section.id === 'tls') {
+        const tlsHit = sectionHit || TLS_SEARCH_TERMS.some((t) => matchesQuery(t, q) || matchesQuery(q, t))
+        return tlsHit ? section : { ...section, keys: [] as FieldDef[], _hide: true as const }
+      }
+
+      const keys = section.keys.filter(
+        (f) =>
+          sectionHit ||
+          matchesQuery(f.label, q) ||
+          matchesQuery(f.description, q) ||
+          matchesQuery(f.key, q),
+      )
+      return { ...section, keys, _hide: keys.length === 0 }
+    }).filter((s) => !(s as { _hide?: boolean })._hide)
+  }, [query])
 
   async function onSave() {
     setBusy(true)
@@ -115,9 +423,18 @@ export function SettingsPage({ auth }: { auth: AuthStatus | null }) {
           }
         }
       }
+      body.NPM_PROXY_DEFAULT_CERTIFICATE_ID = draft.NPM_PROXY_DEFAULT_CERTIFICATE_ID || ''
+      body.CERT_DOMAIN_MAP = serializeDomainMap(domainRows)
       const next = await saveSettings(body)
       setSettings(next)
+      setDraft((d) => ({
+        ...d,
+        CERT_DOMAIN_MAP: String(next.CERT_DOMAIN_MAP ?? ''),
+        NPM_PROXY_DEFAULT_CERTIFICATE_ID: String(next.NPM_PROXY_DEFAULT_CERTIFICATE_ID ?? ''),
+      }))
+      setDomainRows(parseDomainMap(String(next.CERT_DOMAIN_MAP ?? '')))
       setSaved(true)
+      window.setTimeout(() => setSaved(false), 2500)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Save failed')
     } finally {
@@ -127,55 +444,319 @@ export function SettingsPage({ auth }: { auth: AuthStatus | null }) {
 
   const canEdit = !!auth?.authConfigured
 
+  function scrollToSection(id: string) {
+    setActiveSection(id)
+    document.getElementById(`settings-${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+
   return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Settings</h1>
-        <p className="text-sm text-muted-foreground">
-          Stored in SQLite under /data. Env vars bootstrap defaults.
-          {!canEdit && ' Configure WEB_UI_TOKEN or OIDC (via env) before saving from the UI.'}
-        </p>
+    <div className="pb-24">
+      <div className="mb-6 space-y-3">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">Settings</h1>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Stored in SQLite under <code className="text-xs">/data</code>. Environment variables bootstrap defaults.
+          </p>
+        </div>
+
+        {!canEdit && (
+          <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">
+            Configure <code className="text-xs">WEB_UI_TOKEN</code> or OIDC via env before saving from the UI.
+          </div>
+        )}
+
+        <div className="relative max-w-xl">
+          <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search settings (e.g. SSL, tunnel, OIDC…)"
+            className="pl-9"
+            aria-label="Search settings"
+          />
+        </div>
       </div>
 
-      {error && <p className="text-sm text-destructive">{error}</p>}
-      {saved && <p className="text-sm text-green-600">Saved.</p>}
+      {error && <p className="mb-4 text-sm text-destructive">{error}</p>}
 
-      {SECTIONS.map((section) => (
-        <Card key={section.title}>
-          <CardHeader>
-            <CardTitle className="text-base">{section.title}</CardTitle>
-          </CardHeader>
-          <CardContent className="grid gap-3">
-            {section.keys.map((field) => (
-              <div key={field.key} className="grid gap-1.5 sm:grid-cols-[220px_1fr] sm:items-center">
-                <Label htmlFor={field.key}>{field.label}</Label>
-                {field.bool ? (
-                  <Switch
-                    id={field.key}
-                    checked={draft[field.key] === 'true'}
-                    disabled={!canEdit}
-                    onCheckedChange={(v) => setDraft((d) => ({ ...d, [field.key]: String(v) }))}
-                  />
-                ) : (
-                  <Input
-                    id={field.key}
-                    type={field.secret ? 'password' : 'text'}
-                    placeholder={field.secret && settings[`${field.key}_SET`] ? '•••••••• (unchanged)' : undefined}
-                    value={draft[field.key] ?? ''}
-                    disabled={!canEdit}
-                    onChange={(e) => setDraft((d) => ({ ...d, [field.key]: e.target.value }))}
-                  />
-                )}
-              </div>
-            ))}
-          </CardContent>
-        </Card>
-      ))}
+      <div className="grid gap-6 lg:grid-cols-[200px_1fr]">
+        <aside className="hidden lg:block">
+          <nav className="sticky top-4 space-y-0.5">
+            <p className="mb-2 px-2 text-xs font-medium tracking-wide text-muted-foreground uppercase">
+              Sections
+            </p>
+            {SECTIONS.map((section) => {
+              const visible = filteredSections.some((s) => s.id === section.id)
+              if (!visible) return null
+              const Icon = section.icon
+              return (
+                <button
+                  key={section.id}
+                  type="button"
+                  onClick={() => scrollToSection(section.id)}
+                  className={cn(
+                    'flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors',
+                    activeSection === section.id
+                      ? 'bg-accent text-accent-foreground'
+                      : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground',
+                  )}
+                >
+                  <Icon className="size-3.5 shrink-0" />
+                  <span className="truncate">{section.title}</span>
+                </button>
+              )
+            })}
+          </nav>
+        </aside>
 
-      <div className="flex justify-end">
-        <Button disabled={!canEdit || busy} onClick={() => void onSave()}>
-          Save settings
+        <div className="space-y-5">
+          {filteredSections.length === 0 && (
+            <Card>
+              <CardContent className="py-10 text-center text-sm text-muted-foreground">
+                No settings match “{query}”.
+              </CardContent>
+            </Card>
+          )}
+
+          {filteredSections.map((section) => {
+            const Icon = section.icon
+            return (
+              <Card key={section.id} id={`settings-${section.id}`} className="scroll-mt-4">
+                <CardHeader className="pb-3">
+                  <div className="flex items-start gap-3">
+                    <div className="mt-0.5 rounded-md bg-muted p-2">
+                      <Icon className="size-4 text-muted-foreground" />
+                    </div>
+                    <div>
+                      <CardTitle className="text-base font-semibold text-foreground">{section.title}</CardTitle>
+                      <CardDescription className="mt-1">{section.description}</CardDescription>
+                    </div>
+                  </div>
+                </CardHeader>
+                <CardContent className="space-y-1">
+                  {section.id === 'tls' ? (
+                    <TlsSection
+                      canEdit={canEdit}
+                      certs={certs}
+                      draft={draft}
+                      setDraft={setDraft}
+                      domainRows={domainRows}
+                      setDomainRows={setDomainRows}
+                    />
+                  ) : (
+                    section.keys.map((field) => (
+                      <FieldRow
+                        key={field.key}
+                        field={field}
+                        value={draft[field.key] ?? ''}
+                        canEdit={canEdit}
+                        secretSet={!!settings[`${field.key}_SET`]}
+                        onChange={(v) => setDraft((d) => ({ ...d, [field.key]: v }))}
+                      />
+                    ))
+                  )}
+                </CardContent>
+              </Card>
+            )
+          })}
+        </div>
+      </div>
+
+      <div className="fixed inset-x-0 bottom-0 z-20 border-t bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80">
+        <div className="mx-auto flex max-w-6xl items-center justify-between gap-3 px-4 py-3">
+          <p className="text-sm text-muted-foreground">
+            {saved ? (
+              <span className="inline-flex items-center gap-1.5 text-green-500">
+                <Check className="size-4" /> Saved
+              </span>
+            ) : (
+              'Changes apply after save; sync uses the new values on the next event.'
+            )}
+          </p>
+          <Button disabled={!canEdit || busy} onClick={() => void onSave()} className="gap-1.5">
+            <Save className="size-4" />
+            {busy ? 'Saving…' : 'Save settings'}
+          </Button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function FieldRow({
+  field,
+  value,
+  canEdit,
+  secretSet,
+  onChange,
+}: {
+  field: FieldDef
+  value: string
+  canEdit: boolean
+  secretSet: boolean
+  onChange: (value: string) => void
+}) {
+  return (
+    <div className="grid gap-3 border-b border-border/60 py-4 last:border-0 sm:grid-cols-[minmax(0,1fr)_minmax(220px,280px)] sm:items-start">
+      <div className="min-w-0 space-y-1">
+        <div className="flex flex-wrap items-center gap-2">
+          <Label htmlFor={field.key} className="text-sm font-medium">
+            {field.label}
+          </Label>
+          <code className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+            {field.key}
+          </code>
+        </div>
+        <p className="text-sm leading-snug text-muted-foreground">{field.description}</p>
+      </div>
+      <div className="sm:justify-self-end sm:w-full">
+        {field.bool ? (
+          <div className="flex h-9 items-center sm:justify-end">
+            <Switch
+              id={field.key}
+              checked={value === 'true'}
+              disabled={!canEdit}
+              onCheckedChange={(v) => onChange(String(v))}
+            />
+          </div>
+        ) : (
+          <Input
+            id={field.key}
+            type={field.secret ? 'password' : 'text'}
+            placeholder={
+              field.secret && secretSet
+                ? '•••••••• (unchanged)'
+                : field.placeholder
+            }
+            value={value}
+            disabled={!canEdit}
+            onChange={(e) => onChange(e.target.value)}
+            autoComplete={field.secret ? 'new-password' : undefined}
+          />
+        )}
+      </div>
+    </div>
+  )
+}
+
+function TlsSection({
+  canEdit,
+  certs,
+  draft,
+  setDraft,
+  domainRows,
+  setDomainRows,
+}: {
+  canEdit: boolean
+  certs: CertificateInfo[]
+  draft: Record<string, string>
+  setDraft: React.Dispatch<React.SetStateAction<Record<string, string>>>
+  domainRows: { pattern: string; certId: string }[]
+  setDomainRows: React.Dispatch<React.SetStateAction<{ pattern: string; certId: string }[]>>
+}) {
+  return (
+    <div className="space-y-6 pt-1">
+      <div className="grid gap-3 border-b border-border/60 pb-4 sm:grid-cols-[minmax(0,1fr)_minmax(220px,280px)] sm:items-start">
+        <div className="space-y-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <Label htmlFor="NPM_PROXY_DEFAULT_CERTIFICATE_ID" className="text-sm font-medium">
+              Default certificate
+            </Label>
+            <code className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+              NPM_PROXY_DEFAULT_CERTIFICATE_ID
+            </code>
+          </div>
+          <p className="text-sm leading-snug text-muted-foreground">
+            Fallback when Force SSL is on and no domain map or NPMplus domain match is found.
+          </p>
+        </div>
+        <select
+          id="NPM_PROXY_DEFAULT_CERTIFICATE_ID"
+          className="flex h-9 w-full rounded-md border bg-transparent px-3 text-sm"
+          disabled={!canEdit}
+          value={draft.NPM_PROXY_DEFAULT_CERTIFICATE_ID ?? ''}
+          onChange={(e) => setDraft((d) => ({ ...d, NPM_PROXY_DEFAULT_CERTIFICATE_ID: e.target.value }))}
+        >
+          <option value="">None (auto-match only)</option>
+          {certs.map((c) => (
+            <option key={c.id} value={String(c.id)}>{certLabel(c)}</option>
+          ))}
+        </select>
+      </div>
+
+      <div className="space-y-3">
+        <div className="space-y-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <Label className="text-sm font-medium">Default cert by domain</Label>
+            <code className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+              CERT_DOMAIN_MAP
+            </code>
+          </div>
+          <p className="text-sm leading-snug text-muted-foreground">
+            Applied during sync and auto-bridge. Exact hostnames first, then wildcards like{' '}
+            <code className="text-xs">*.example.com</code>. A match also enables Force SSL for that host.
+          </p>
+        </div>
+
+        {domainRows.length === 0 && (
+          <p className="text-sm text-muted-foreground">No domain mappings yet.</p>
+        )}
+
+        <div className="space-y-2">
+          {domainRows.map((row, i) => (
+            <div key={i} className="grid gap-2 sm:grid-cols-[1fr_1fr_auto]">
+              <Input
+                placeholder="*.example.com or app.example.com"
+                disabled={!canEdit}
+                value={row.pattern}
+                onChange={(e) => {
+                  const next = [...domainRows]
+                  next[i] = { ...next[i], pattern: e.target.value }
+                  setDomainRows(next)
+                }}
+              />
+              <select
+                className="flex h-9 w-full rounded-md border bg-transparent px-3 text-sm"
+                disabled={!canEdit}
+                value={row.certId}
+                onChange={(e) => {
+                  const next = [...domainRows]
+                  next[i] = { ...next[i], certId: e.target.value }
+                  setDomainRows(next)
+                }}
+              >
+                <option value="">Select certificate…</option>
+                {certs.map((c) => (
+                  <option key={c.id} value={String(c.id)}>{certLabel(c)}</option>
+                ))}
+              </select>
+              <Button
+                type="button"
+                variant="outline"
+                disabled={!canEdit}
+                onClick={() => setDomainRows(domainRows.filter((_, j) => j !== i))}
+              >
+                Remove
+              </Button>
+            </div>
+          ))}
+        </div>
+
+        <Button
+          type="button"
+          variant="secondary"
+          disabled={!canEdit}
+          className="w-fit"
+          onClick={() => setDomainRows([...domainRows, { pattern: '', certId: '' }])}
+        >
+          Add domain mapping
         </Button>
+
+        {certs.length === 0 && (
+          <p className="text-sm text-muted-foreground">
+            No certificates loaded from NPMplus yet. Check NPM connection settings.
+          </p>
+        )}
       </div>
     </div>
   )

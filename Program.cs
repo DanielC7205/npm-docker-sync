@@ -303,6 +303,18 @@ app.MapPost("/api/routes/{containerId}/sync", async (
     }
 });
 
+app.MapGet("/api/certificates", async (CertificateService certs, CancellationToken ct) =>
+{
+    try
+    {
+        return Results.Ok(await certs.ListCertificatesAsync(ct));
+    }
+    catch (Exception ex)
+    {
+        return Results.Json(new { error = ex.Message }, statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+});
+
 app.MapGet("/api/settings", (SettingsStore settings) => Results.Ok(settings.GetPublicSettings()));
 
 app.MapPut("/api/settings", (SettingsStore settings, Dictionary<string, string?> body) =>

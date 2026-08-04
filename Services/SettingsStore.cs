@@ -28,6 +28,7 @@ public class SettingsStore
         "NPM_TLS_SKIP_VERIFY", "NPM_ADOPT_EXISTING",
         "NPM_PROXY_SSL_FORCE", "NPM_PROXY_CACHING", "NPM_PROXY_BLOCK_EXPLOITS",
         "NPM_PROXY_WEBSOCKETS", "NPM_PROXY_HTTP2", "NPM_PROXY_HSTS", "NPM_PROXY_HSTS_SUBDOMAINS",
+        "NPM_PROXY_DEFAULT_CERTIFICATE_ID", "CERT_DOMAIN_MAP",
         "SYNC_INSTANCE_ID",
         "OIDC_AUTHORITY", "OIDC_CLIENT_ID", "OIDC_CLIENT_SECRET", "OIDC_SCOPES", "OIDC_CALLBACK_PATH",
         "KOMODO_URL", "KOMODO_SERVER", "KOMODO_API_KEY", "KOMODO_API_SECRET",
@@ -420,6 +421,9 @@ public class SettingsStore
 
 public class RouteOverride
 {
+    public string? DisplayName { get; set; }
+    public List<string>? Domains { get; set; }
+    public bool? Hidden { get; set; }
     public string? ForwardHost { get; set; }
     public int? ForwardPort { get; set; }
     public string? ForwardScheme { get; set; }

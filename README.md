@@ -58,6 +58,8 @@ Monitor 🐳 Docker containers and automatically synchronize proxy configuration
 - `PROXY_BASE_DOMAIN`: When set (e.g. `example.com`), short domain aliases without a dot expand to `{alias}.{PROXY_BASE_DOMAIN}` for both `proxy.aliases` and `npm.proxy.domains`. Also used by auto-bridge (`{container}.{PROXY_BASE_DOMAIN}`).
 - `AUTO_BRIDGE_EXPOSED`: When `true`, automatically create a proxy for running containers that expose a port and have no `npm.*`/`proxy.*` labels (requires `PROXY_BASE_DOMAIN`). Default: `false`.
 - `AUTO_BRIDGE_EXCLUDE`: Comma-separated container name substrings to skip for auto-bridge (default: `npmplus,npm-docker-sync,nginx-proxy-manager`). Opt out per container with `proxy.autobridge=false` or `npm.proxy.autobridge=false`.
+- `CERT_DOMAIN_MAP`: Domain → certificate ID map for sync/auto-bridge (e.g. `*.example.com=3` or multiline). Exact match first, then wildcard patterns. Applied before NPM name matching; also enables Force SSL for that host.
+- `NPM_PROXY_DEFAULT_CERTIFICATE_ID`: Fallback certificate ID when Force SSL is on and no map/NPM match is found.
 - `AUTH_REQUEST_DEFAULT` / `AUTH_REQUEST_UPSTREAM`: Default NPMplus `npmplus_auth_request` provider for synced routes (`none`, `authentik`, `oauth2proxy`, …).
 - `TUNNEL_BASE_DOMAIN` / `TUNNEL_FORWARD_HOST` / `TUNNEL_DEFAULT_TTL_MINUTES` / `TUNNEL_API_TOKEN` / `TUNNEL_REQUIRE_AUTH`: Temporary share tunnels (NPMplus must reach the forward host).
 

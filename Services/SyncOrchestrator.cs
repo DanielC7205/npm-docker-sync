@@ -499,7 +499,9 @@ public class SyncOrchestrator
                     ContainerId = containerId,
                     ContainerName = containerName,
                     Index = index,
-                    Name = config.Homepage?.Name ?? containerName,
+                    Name = !string.IsNullOrWhiteSpace(routeOverride?.DisplayName)
+                        ? routeOverride!.DisplayName!.Trim()
+                        : (config.Homepage?.Name ?? containerName),
                     Description = config.Homepage?.Description,
                     Icon = icon,
                     Category = config.Homepage?.Category
@@ -523,6 +525,7 @@ public class SyncOrchestrator
                     AuthRequest = config.AuthRequest ?? npmHost?.NpmplusAuthRequest,
                     AuthRequestUpstream = config.AuthRequestUpstream ?? npmHost?.NpmplusAuthRequestUpstream,
                     AuthExempt = routeOverride?.AuthExempt,
+                    Hidden = routeOverride?.Hidden == true,
                     HasUiOverride = routeOverride != null,
                     KomodoUrl = komodo?.Url,
                     KomodoResourceType = komodo?.ResourceType,
@@ -537,16 +540,17 @@ public class SyncOrchestrator
     public async Task<DashboardStats> GetStatsAsync(CancellationToken cancellationToken)
     {
         var routes = await GetRoutesAsync(cancellationToken);
+        var visible = routes.Where(r => !r.Hidden).ToList();
         var uptime = DateTime.UtcNow - _startedAt;
 
         return new DashboardStats
         {
             UptimeSeconds = (long)uptime.TotalSeconds,
-            Total = routes.Count(r => r.Status != RouteStatus.Excluded),
-            Synced = routes.Count(r => r.Status == RouteStatus.Synced),
-            Missing = routes.Count(r => r.Status == RouteStatus.Missing),
-            Disabled = routes.Count(r => r.Status == RouteStatus.Disabled),
-            Conflict = routes.Count(r => r.Status == RouteStatus.Conflict),
+            Total = visible.Count(r => r.Status != RouteStatus.Excluded),
+            Synced = visible.Count(r => r.Status == RouteStatus.Synced),
+            Missing = visible.Count(r => r.Status == RouteStatus.Missing),
+            Disabled = visible.Count(r => r.Status == RouteStatus.Disabled),
+            Conflict = visible.Count(r => r.Status == RouteStatus.Conflict),
         };
     }
 
@@ -639,7 +643,18 @@ public class SyncOrchestrator
             }
         }
 
-        if (config.SslForced && !config.CertificateId.HasValue)
+        if (!config.CertificateId.HasValue || config.CertificateId == 0)
+        {
+            var mapped = _certificateService.ResolveFromDomainMap(config.DomainNames);
+            if (mapped.HasValue)
+            {
+                config.CertificateId = mapped.Value;
+                config.SslForced = true;
+                _logger.LogInformation("CERT_DOMAIN_MAP selected certificate {CertId} for proxy {Index}", mapped.Value, index);
+            }
+        }
+
+        if (config.SslForced && (!config.CertificateId.HasValue || config.CertificateId == 0))
         {
             var certId = await _certificateService.FindMatchingCertificateAsync(config.DomainNames, cancellationToken);
             if (certId.HasValue)
@@ -1001,6 +1016,24 @@ public class SyncOrchestrator
         if (ov == null)
             return;
 
+        if (!string.IsNullOrWhiteSpace(ov.DisplayName))
+        {
+            config.Homepage ??= new HomepageInfo();
+            config.Homepage.Name = ov.DisplayName.Trim();
+        }
+
+        if (ov.Domains != null)
+        {
+            var expanded = ov.Domains
+                .SelectMany(d => (d ?? string.Empty).Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                .Where(d => !string.IsNullOrWhiteSpace(d))
+                .Select(ExpandDomainAlias)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            if (expanded.Count > 0)
+                config.DomainNames = expanded;
+        }
+
         if (!string.IsNullOrWhiteSpace(ov.ForwardHost))
             config.ForwardHost = ov.ForwardHost;
         if (ov.ForwardPort.HasValue)
@@ -1039,11 +1072,24 @@ public class SyncOrchestrator
                 config.AuthRequestUpstream = ov.AuthRequestUpstream;
         }
 
-        if (!string.IsNullOrWhiteSpace(ov.Icon))
+        if (ov.Icon != null)
         {
             config.Homepage ??= new HomepageInfo();
-            config.Homepage.Icon = ov.Icon;
+            config.Homepage.Icon = IconResolver.NormalizeIconUrl(ov.Icon) ?? string.Empty;
         }
+    }
+
+    private string ExpandDomainAlias(string alias)
+    {
+        var trimmed = alias.Trim();
+        if (trimmed.Contains('.'))
+            return trimmed;
+
+        var baseDomain = _settings.Get("PROXY_BASE_DOMAIN")?.Trim().TrimStart('.');
+        if (string.IsNullOrWhiteSpace(baseDomain))
+            return trimmed;
+
+        return $"{trimmed}.{baseDomain}";
     }
 
     private void ApplyDefaultAuthRequest(ProxyConfiguration config)
@@ -1064,6 +1110,17 @@ public class SyncOrchestrator
 
     private static void MergeOverride(RouteOverride target, RouteOverride patch)
     {
+        if (patch.DisplayName != null) target.DisplayName = string.IsNullOrWhiteSpace(patch.DisplayName) ? null : patch.DisplayName.Trim();
+        if (patch.Domains != null)
+        {
+            target.Domains = patch.Domains
+                .SelectMany(d => (d ?? string.Empty).Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                .Where(d => !string.IsNullOrWhiteSpace(d))
+                .ToList();
+            if (target.Domains.Count == 0)
+                target.Domains = null;
+        }
+        if (patch.Hidden.HasValue) target.Hidden = patch.Hidden;
         if (patch.ForwardHost != null) target.ForwardHost = patch.ForwardHost;
         if (patch.ForwardPort.HasValue) target.ForwardPort = patch.ForwardPort;
         if (patch.ForwardScheme != null) target.ForwardScheme = patch.ForwardScheme;
@@ -1078,7 +1135,10 @@ public class SyncOrchestrator
         if (patch.AuthRequest != null) target.AuthRequest = patch.AuthRequest;
         if (patch.AuthRequestUpstream != null) target.AuthRequestUpstream = patch.AuthRequestUpstream;
         if (patch.AuthExempt.HasValue) target.AuthExempt = patch.AuthExempt;
-        if (patch.Icon != null) target.Icon = patch.Icon;
+        if (patch.Icon != null)
+            target.Icon = string.IsNullOrWhiteSpace(patch.Icon)
+                ? null
+                : IconResolver.NormalizeIconUrl(patch.Icon);
         if (patch.AdvancedConfig != null) target.AdvancedConfig = patch.AdvancedConfig;
     }
 
@@ -1148,6 +1208,7 @@ public class RouteInfo
     public string? AuthRequest { get; set; }
     public string? AuthRequestUpstream { get; set; }
     public bool? AuthExempt { get; set; }
+    public bool Hidden { get; set; }
     public bool HasUiOverride { get; set; }
     public string? KomodoUrl { get; set; }
     public string? KomodoResourceType { get; set; }

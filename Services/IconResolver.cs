@@ -30,6 +30,27 @@ public class IconResolver
     public static string CdnUrl(string slug, string format = "png") =>
         $"https://cdn.jsdelivr.net/gh/selfhst/icons/{format}/{slug}.{format}";
 
+    /// <summary>
+    /// Bare names (no protocol) become selfh.st CDN URLs: …/png/{slug}.png
+    /// Full URLs, data URIs, and absolute paths are left unchanged.
+    /// </summary>
+    public static string? NormalizeIconUrl(string? icon)
+    {
+        if (string.IsNullOrWhiteSpace(icon))
+            return null;
+
+        var value = icon.Trim();
+        if (value.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+            value.StartsWith("https://", StringComparison.OrdinalIgnoreCase) ||
+            value.StartsWith("data:", StringComparison.OrdinalIgnoreCase) ||
+            value.StartsWith("/"))
+            return value;
+
+        var bare = Regex.Replace(value, @"\.(png|svg|webp)$", "", RegexOptions.IgnoreCase);
+        var slug = ToSlug(bare);
+        return string.IsNullOrEmpty(slug) ? null : CdnUrl(slug);
+    }
+
     public async Task<string?> ResolveAsync(
         string? overrideIcon,
         string? labelIcon,
@@ -37,8 +58,9 @@ public class IconResolver
         string? containerName,
         CancellationToken cancellationToken)
     {
-        if (!string.IsNullOrWhiteSpace(overrideIcon))
-            return overrideIcon.Trim();
+        var normalizedOverride = NormalizeIconUrl(overrideIcon);
+        if (!string.IsNullOrWhiteSpace(normalizedOverride))
+            return normalizedOverride;
 
         if (!string.IsNullOrWhiteSpace(labelIcon))
         {
@@ -49,14 +71,9 @@ public class IconResolver
                 label.StartsWith("/"))
                 return label;
 
-            // Treat plain names as selfh.st references
-            var fromLabel = ToSlug(label);
-            if (!string.IsNullOrEmpty(fromLabel))
-            {
-                var url = CdnUrl(fromLabel);
-                if (await ExistsAsync(url, cancellationToken))
-                    return url;
-            }
+            var fromLabel = NormalizeIconUrl(label);
+            if (!string.IsNullOrEmpty(fromLabel) && await ExistsAsync(fromLabel, cancellationToken))
+                return fromLabel;
         }
 
         foreach (var candidate in new[] { displayName, containerName })
@@ -69,7 +86,6 @@ public class IconResolver
             if (await ExistsAsync(url, cancellationToken))
                 return url;
 
-            // Strip common docker compose suffixes: -1, _server, etc.
             var trimmed = Regex.Replace(slug, @"-(server|frontend|backend|core|app|web|\d+)$", "");
             if (trimmed != slug && !string.IsNullOrEmpty(trimmed))
             {

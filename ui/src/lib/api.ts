@@ -27,6 +27,7 @@ export interface RouteInfo {
   authRequest?: string | null
   authRequestUpstream?: string | null
   authExempt?: boolean | null
+  hidden?: boolean
   hasUiOverride?: boolean
   komodoUrl?: string | null
   komodoResourceType?: string | null
@@ -62,6 +63,14 @@ export interface TunnelInfo {
   label?: string | null
   createdBy?: string | null
   createdAt: string
+}
+
+export interface CertificateInfo {
+  id: number
+  niceName?: string | null
+  provider?: string | null
+  domainNames: string[]
+  expiresOn?: string | null
 }
 
 export type AppSettings = Record<string, string | boolean | null | undefined>
@@ -100,6 +109,7 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
 export const fetchAuthStatus = () => api<AuthStatus>('/api/auth/status')
 export const fetchStats = () => api<DashboardStats>('/api/stats')
 export const fetchRoutes = () => api<RouteInfo[]>('/api/routes')
+export const fetchCertificates = () => api<CertificateInfo[]>('/api/certificates')
 export const fetchSettings = () => api<AppSettings>('/api/settings')
 export const saveSettings = (body: Record<string, string | null>) =>
   api<AppSettings>('/api/settings', { method: 'PUT', body: JSON.stringify(body) })
