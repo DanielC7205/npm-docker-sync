@@ -50,7 +50,7 @@
         "npmDockerSync.forwardHost": {
           "type": "string",
           "default": "",
-          "description": "Optional override for tunnel forward host (LAN/Tailscale IP)"
+          "description": "Optional override for tunnel forward host. When empty, the extension auto-detects this machine's Tailscale/LAN IPv4."
         }
       }
     }

@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
+import * as os from 'os';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 
@@ -45,10 +46,38 @@ function workspaceLabel(): string {
   return folder.name || path.basename(folder.uri.fsPath);
 }
 
+/** Prefer Tailscale (100.x), then private LAN IPv4 — what NPMplus should dial. */
+function detectLocalIp(): string | undefined {
+  const cfg = vscode.workspace.getConfiguration('npmDockerSync');
+  const override = (cfg.get<string>('forwardHost') || '').trim();
+  if (override) return override;
+
+  const nets = os.networkInterfaces();
+  const candidates: { ip: string; score: number }[] = [];
+
+  for (const entries of Object.values(nets)) {
+    if (!entries) continue;
+    for (const entry of entries) {
+      const family = entry.family as string | number;
+      if (entry.internal || (family !== 'IPv4' && family !== 4)) continue;
+      const ip = entry.address;
+      let score = 10;
+      if (ip.startsWith('100.')) score = 100; // Tailscale CGNAT
+      else if (ip.startsWith('192.168.')) score = 80;
+      else if (ip.startsWith('10.')) score = 70;
+      else if (/^172\.(1[6-9]|2\d|3[0-1])\./.test(ip)) score = 60;
+      else score = 20;
+      candidates.push({ ip, score });
+    }
+  }
+
+  candidates.sort((a, b) => b.score - a.score);
+  return candidates[0]?.ip;
+}
+
 async function detectListeningPorts(): Promise<number[]> {
   const found = new Set<number>();
 
-  // Common Vite/Next/etc. ports as soft suggestions
   for (const p of [3000, 3001, 5173, 5174, 8080, 8000, 4200, 5000, 4321, 4000, 9229]) {
     found.add(p);
   }
@@ -90,6 +119,14 @@ async function detectListeningPorts(): Promise<number[]> {
 async function sharePort() {
   const detected = await detectListeningPorts();
   const project = workspaceLabel();
+  const host = detectLocalIp();
+
+  if (!host) {
+    vscode.window.showErrorMessage(
+      'Could not detect a local IPv4 address. Set npmDockerSync.forwardHost to an IP NPMplus can reach.',
+    );
+    return;
+  }
 
   const picks: vscode.QuickPickItem[] = [
     ...detected.slice(0, 40).map((p) => ({
@@ -105,7 +142,7 @@ async function sharePort() {
   ];
 
   const chosen = await vscode.window.showQuickPick(picks, {
-    placeHolder: `Share a port for “${project}”`,
+    placeHolder: `Share a port for “${project}” → ${host}`,
     matchOnDescription: true,
     matchOnDetail: true,
   });
@@ -131,28 +168,6 @@ async function sharePort() {
   });
   if (label === undefined) return;
 
-  const cfg = vscode.workspace.getConfiguration('npmDockerSync');
-  let host = (cfg.get<string>('forwardHost') || '').trim() || undefined;
-
-  if (!host) {
-    const hostPick = await vscode.window.showInputBox({
-      prompt:
-        'Host NPMplus should dial (LAN/Tailscale IP). Leave empty to use server TUNNEL_FORWARD_HOST / host.docker.internal.',
-      placeHolder: '100.x.y.z or 192.168.x.x',
-      ignoreFocusOut: true,
-    });
-    if (hostPick === undefined) return;
-    host = hostPick.trim() || undefined;
-    if (host) {
-      const save = await vscode.window.showQuickPick(['Save as extension setting', 'Use once'], {
-        placeHolder: `Remember ${host}?`,
-      });
-      if (save === 'Save as extension setting') {
-        await cfg.update('forwardHost', host, vscode.ConfigurationTarget.Global);
-      }
-    }
-  }
-
   try {
     const tunnel = await api<TunnelResponse>('/api/tunnels', {
       method: 'POST',
@@ -166,7 +181,7 @@ async function sharePort() {
     await vscode.env.clipboard.writeText(tunnel.url);
     updateStatus(tunnel);
     const pick = await vscode.window.showInformationMessage(
-      `Tunnel ready: ${tunnel.url} (copied)`,
+      `Tunnel ready: ${tunnel.url} → ${host}:${portStr} (copied)`,
       'Copy again',
       'Stop',
     );
@@ -179,8 +194,8 @@ async function sharePort() {
     const msg = e instanceof Error ? e.message : String(e);
     vscode.window.showErrorMessage(
       `Tunnel failed: ${msg}` +
-        (msg.includes('TUNNEL_FORWARD_HOST')
-          ? ' Set Settings → Dev tunnels → Forward host, or npmDockerSync.forwardHost.'
+        (msg.includes('certificate') || msg.includes('TLS') || msg.includes('SSL')
+          ? ' Set Settings → TLS → Tunnel certificate to a wildcard covering TUNNEL_BASE_DOMAIN.'
           : ''),
     );
   }

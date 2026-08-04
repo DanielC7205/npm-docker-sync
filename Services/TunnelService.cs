@@ -46,8 +46,8 @@ public class TunnelService
         if (string.IsNullOrWhiteSpace(forwardHost))
         {
             throw new InvalidOperationException(
-                "TUNNEL_FORWARD_HOST is required. Set it in Settings to an IP/hostname NPMplus can reach " +
-                "(LAN or Tailscale), or set npmDockerSync.forwardHost in the VS Code extension.");
+                "TUNNEL_FORWARD_HOST is required. The VS Code extension should send your machine IP automatically; " +
+                "or set Forward host under Settings → Dev tunnels.");
         }
 
         var ttl = ttlMinutes ?? _settings.GetInt("TUNNEL_DEFAULT_TTL_MINUTES", 120);
@@ -58,16 +58,13 @@ public class TunnelService
         var domain = $"{slug}.{baseDomain}";
         var forwardScheme = string.IsNullOrWhiteSpace(scheme) ? "http" : scheme.Trim().ToLowerInvariant();
 
-        var certId = 0;
-        try
+        var certId = await ResolveTunnelCertificateIdAsync(domain, baseDomain, cancellationToken);
+        if (!certId.HasValue || certId.Value <= 0)
         {
-            var match = await _certificates.FindMatchingCertificateAsync(new List<string> { domain }, cancellationToken);
-            if (match.HasValue)
-                certId = match.Value;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogDebug(ex, "Certificate lookup failed for tunnel domain {Domain}", domain);
+            throw new InvalidOperationException(
+                "No TLS certificate for tunnels. Set TUNNEL_CERTIFICATE_ID (Settings → TLS), " +
+                $"add CERT_DOMAIN_MAP for *.{baseDomain}, or ensure NPMplus has a matching wildcard cert " +
+                $"(e.g. *.{baseDomain} or *.parent.domain). Without a cert, HTTPS tunnels fail with SSL_VERSION_OR_CIPHER_MISMATCH.");
         }
 
         var authRequest = "none";
@@ -84,8 +81,10 @@ public class TunnelService
             ForwardScheme = forwardScheme,
             ForwardHost = forwardHost,
             ForwardPort = port,
-            CertificateId = certId,
-            SslForced = certId > 0,
+            CertificateId = certId.Value,
+            SslForced = true,
+            Http2Support = true,
+            HstsEnabled = true,
             AllowWebsocketUpgrade = true,
             BlockExploits = true,
             Enabled = true,
@@ -117,9 +116,43 @@ public class TunnelService
         };
 
         _settings.InsertTunnel(tunnel);
-        _logger.LogInformation("Created tunnel {Domain} -> {Host}:{Port} expires {Expires}",
-            domain, forwardHost, port, tunnel.ExpiresAt);
+        _logger.LogInformation("Created tunnel {Domain} -> {Host}:{Port} cert={CertId} expires {Expires}",
+            domain, forwardHost, port, certId.Value, tunnel.ExpiresAt);
         return tunnel;
+    }
+
+    private async Task<int?> ResolveTunnelCertificateIdAsync(
+        string domain,
+        string baseDomain,
+        CancellationToken cancellationToken)
+    {
+        var explicitId = _settings.Get("TUNNEL_CERTIFICATE_ID");
+        if (int.TryParse(explicitId, out var configured) && configured > 0)
+        {
+            _logger.LogInformation("Using TUNNEL_CERTIFICATE_ID {CertId} for tunnel {Domain}", configured, domain);
+            return configured;
+        }
+
+        // Prefer map / match for the full hostname, then wildcard of the tunnel base, then base itself
+        var candidates = new List<string> { domain, $"*.{baseDomain}", baseDomain };
+        var parent = ParentDomain(baseDomain);
+        if (!string.IsNullOrEmpty(parent))
+        {
+            candidates.Add($"*.{parent}");
+            candidates.Add(parent);
+        }
+
+        var match = await _certificates.FindMatchingCertificateAsync(candidates, cancellationToken);
+        if (match.HasValue && match.Value > 0)
+            return match.Value;
+
+        return null;
+    }
+
+    private static string? ParentDomain(string domain)
+    {
+        var parts = domain.Split('.', StringSplitOptions.RemoveEmptyEntries);
+        return parts.Length >= 3 ? string.Join('.', parts.Skip(1)) : null;
     }
 
     public List<TunnelRecord> List() => _settings.ListTunnels();

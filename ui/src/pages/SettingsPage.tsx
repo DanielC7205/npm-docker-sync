@@ -287,8 +287,10 @@ const TLS_SEARCH_TERMS = [
   'cert',
   'ssl',
   'domain map',
+  'tunnel',
   'CERT_DOMAIN_MAP',
   'NPM_PROXY_DEFAULT_CERTIFICATE_ID',
+  'TUNNEL_CERTIFICATE_ID',
 ]
 
 function certLabel(c: CertificateInfo) {
@@ -352,6 +354,7 @@ export function SettingsPage({ auth }: { auth: AuthStatus | null }) {
           }
         }
         d.NPM_PROXY_DEFAULT_CERTIFICATE_ID = String(s.NPM_PROXY_DEFAULT_CERTIFICATE_ID ?? '')
+        d.TUNNEL_CERTIFICATE_ID = String(s.TUNNEL_CERTIFICATE_ID ?? '')
         d.CERT_DOMAIN_MAP = String(s.CERT_DOMAIN_MAP ?? '')
         setDraft(d)
         setDomainRows(parseDomainMap(d.CERT_DOMAIN_MAP))
@@ -424,6 +427,7 @@ export function SettingsPage({ auth }: { auth: AuthStatus | null }) {
         }
       }
       body.NPM_PROXY_DEFAULT_CERTIFICATE_ID = draft.NPM_PROXY_DEFAULT_CERTIFICATE_ID || ''
+      body.TUNNEL_CERTIFICATE_ID = draft.TUNNEL_CERTIFICATE_ID || ''
       body.CERT_DOMAIN_MAP = serializeDomainMap(domainRows)
       const next = await saveSettings(body)
       setSettings(next)
@@ -431,6 +435,7 @@ export function SettingsPage({ auth }: { auth: AuthStatus | null }) {
         ...d,
         CERT_DOMAIN_MAP: String(next.CERT_DOMAIN_MAP ?? ''),
         NPM_PROXY_DEFAULT_CERTIFICATE_ID: String(next.NPM_PROXY_DEFAULT_CERTIFICATE_ID ?? ''),
+        TUNNEL_CERTIFICATE_ID: String(next.TUNNEL_CERTIFICATE_ID ?? ''),
       }))
       setDomainRows(parseDomainMap(String(next.CERT_DOMAIN_MAP ?? '')))
       setSaved(true)
@@ -678,6 +683,37 @@ function TlsSection({
           onChange={(e) => setDraft((d) => ({ ...d, NPM_PROXY_DEFAULT_CERTIFICATE_ID: e.target.value }))}
         >
           <option value="">None (auto-match only)</option>
+          {certs.map((c) => (
+            <option key={c.id} value={String(c.id)}>{certLabel(c)}</option>
+          ))}
+        </select>
+      </div>
+
+      <div className="grid gap-3 border-b border-border/60 pb-4 sm:grid-cols-[minmax(0,1fr)_minmax(220px,280px)] sm:items-start">
+        <div className="space-y-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <Label htmlFor="TUNNEL_CERTIFICATE_ID" className="text-sm font-medium">
+              Tunnel certificate
+            </Label>
+            <code className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+              TUNNEL_CERTIFICATE_ID
+            </code>
+          </div>
+          <p className="text-sm leading-snug text-muted-foreground">
+            Required for HTTPS tunnels. Use a wildcard that covers your tunnel base
+            (e.g. <code className="text-xs">*.tunnels.example.com</code> or{' '}
+            <code className="text-xs">*.example.com</code>). Without this, browsers show
+            SSL_VERSION_OR_CIPHER_MISMATCH.
+          </p>
+        </div>
+        <select
+          id="TUNNEL_CERTIFICATE_ID"
+          className="flex h-9 w-full rounded-md border bg-transparent px-3 text-sm"
+          disabled={!canEdit}
+          value={draft.TUNNEL_CERTIFICATE_ID ?? ''}
+          onChange={(e) => setDraft((d) => ({ ...d, TUNNEL_CERTIFICATE_ID: e.target.value }))}
+        >
+          <option value="">Auto (domain map / wildcard match)</option>
           {certs.map((c) => (
             <option key={c.id} value={String(c.id)}>{certLabel(c)}</option>
           ))}

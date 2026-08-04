@@ -84,6 +84,33 @@ public class CertificateService
             return wildcardMatch.Id;
         }
 
+        // Also try each additional candidate (e.g. *.tunnels.example.com, parent wildcards)
+        foreach (var domain in domainNames.Skip(1))
+        {
+            if (string.IsNullOrWhiteSpace(domain))
+                continue;
+
+            var lookupHost = domain.StartsWith("*.", StringComparison.Ordinal)
+                ? $"tunnel.{domain[2..]}"
+                : domain;
+            var match = FindPrimaryDomainMatch(certificates, domain)
+                        ?? FindWildcardMatch(certificates, lookupHost);
+            // For literal "*.foo.com" look for cert SAN that equals that pattern
+            if (match == null && domain.StartsWith("*."))
+            {
+                match = certificates.FirstOrDefault(c =>
+                    c.DomainNames != null &&
+                    c.DomainNames.Any(d => d.Equals(domain, StringComparison.OrdinalIgnoreCase)));
+            }
+
+            if (match != null)
+            {
+                _logger.LogInformation("Found certificate (ID: {CertId}) for candidate domain: {Domain}",
+                    match.Id, domain);
+                return match.Id;
+            }
+        }
+
         var fallback = ResolveDefaultCertificateId();
         if (fallback.HasValue)
         {
