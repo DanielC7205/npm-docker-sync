@@ -1,8 +1,19 @@
+import { useMemo } from 'react'
 import { Plus, Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import {
+  Combobox,
+  ComboboxContent,
+  ComboboxEmpty,
+  ComboboxInput,
+  ComboboxItem,
+  ComboboxList,
+} from '@/components/ui/combobox'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import type { CustomLocation, RouteInfo } from '@/lib/api'
+
+type ServiceOption = { value: string; label: string }
 
 export function emptyLocation(mode: 'manual' | 'linked' = 'manual'): CustomLocation {
   return {
@@ -84,22 +95,20 @@ export function CustomLocationsEditor({
               </div>
               <div>
                 <Label className="text-xs text-muted-foreground">Mode</Label>
-                <select
-                  className="mt-1 flex h-9 w-full rounded-md border bg-transparent px-3 text-sm"
-                  value={loc.mode === 'linked' ? 'linked' : 'manual'}
-                  onChange={(e) =>
-                    update(i, {
-                      mode: e.target.value,
-                      ...(e.target.value === 'manual'
-                        ? { linkedContainerId: null }
-                        : {}),
-                    })
-                  }
-                  disabled={!allowLinked}
-                >
-                  <option value="manual">Manual</option>
-                  {allowLinked && <option value="linked">Linked service</option>}
-                </select>
+                <div className="mt-1">
+                  <StringCombobox
+                    value={loc.mode === 'linked' ? 'linked' : 'manual'}
+                    onChange={(mode) =>
+                      update(i, {
+                        mode,
+                        ...(mode === 'manual' ? { linkedContainerId: null } : {}),
+                      })
+                    }
+                    items={allowLinked ? ['manual', 'linked'] : ['manual']}
+                    placeholder="manual"
+                    disabled={!allowLinked}
+                  />
+                </div>
               </div>
             </div>
 
@@ -107,28 +116,27 @@ export function CustomLocationsEditor({
               <div className="space-y-2">
                 <div>
                   <Label className="text-xs text-muted-foreground">Linked service</Label>
-                  <select
-                    className="mt-1 flex h-9 w-full rounded-md border bg-transparent px-3 text-sm"
-                    value={
-                      loc.linkedContainerId
-                        ? `${loc.linkedContainerId}:${loc.linkedProxyIndex ?? 0}`
-                        : ''
-                    }
-                    onChange={(e) => {
-                      const [cid, idx] = e.target.value.split(':')
-                      update(i, {
-                        linkedContainerId: cid || null,
-                        linkedProxyIndex: Number(idx) || 0,
-                      })
-                    }}
-                  >
-                    <option value="">Select a service…</option>
-                    {linkable.map((r) => (
-                      <option key={`${r.containerId}:${r.index}`} value={`${r.containerId}:${r.index}`}>
-                        {r.name} ({r.forwardHost || '?'}:{r.forwardPort ?? '?'})
-                      </option>
-                    ))}
-                  </select>
+                  <div className="mt-1">
+                    <ServiceCombobox
+                      routes={linkable}
+                      value={
+                        loc.linkedContainerId
+                          ? `${loc.linkedContainerId}:${loc.linkedProxyIndex ?? 0}`
+                          : ''
+                      }
+                      onChange={(key) => {
+                        if (!key) {
+                          update(i, { linkedContainerId: null, linkedProxyIndex: 0 })
+                          return
+                        }
+                        const [cid, idx] = key.split(':')
+                        update(i, {
+                          linkedContainerId: cid || null,
+                          linkedProxyIndex: Number(idx) || 0,
+                        })
+                      }}
+                    />
+                  </div>
                 </div>
                 <p className="rounded-md bg-muted/50 px-2 py-1.5 text-xs text-muted-foreground">
                   Upstream locked
@@ -151,14 +159,14 @@ export function CustomLocationsEditor({
               <div className="grid gap-2 sm:grid-cols-3">
                 <div>
                   <Label className="text-xs text-muted-foreground">Scheme</Label>
-                  <select
-                    className="mt-1 flex h-9 w-full rounded-md border bg-transparent px-3 text-sm"
-                    value={loc.forwardScheme || 'http'}
-                    onChange={(e) => update(i, { forwardScheme: e.target.value })}
-                  >
-                    <option value="http">http</option>
-                    <option value="https">https</option>
-                  </select>
+                  <div className="mt-1">
+                    <StringCombobox
+                      value={loc.forwardScheme || 'http'}
+                      onChange={(scheme) => update(i, { forwardScheme: scheme })}
+                      items={['http', 'https']}
+                      placeholder="http"
+                    />
+                  </div>
                 </div>
                 <div className="sm:col-span-2">
                   <Label className="text-xs text-muted-foreground">Host</Label>
@@ -207,5 +215,86 @@ export function CustomLocationsEditor({
         Add location
       </Button>
     </div>
+  )
+}
+
+function StringCombobox({
+  value,
+  onChange,
+  items,
+  placeholder,
+  disabled = false,
+}: {
+  value: string
+  onChange: (v: string) => void
+  items: string[]
+  placeholder?: string
+  disabled?: boolean
+}) {
+  return (
+    <Combobox
+      items={items}
+      value={value || null}
+      onValueChange={(v) => onChange(v ?? '')}
+      disabled={disabled}
+    >
+      <ComboboxInput placeholder={placeholder} className="w-full" disabled={disabled} />
+      <ComboboxContent>
+        <ComboboxEmpty>No options</ComboboxEmpty>
+        <ComboboxList>
+          {(item) => (
+            <ComboboxItem key={item} value={item}>
+              {item}
+            </ComboboxItem>
+          )}
+        </ComboboxList>
+      </ComboboxContent>
+    </Combobox>
+  )
+}
+
+function ServiceCombobox({
+  routes,
+  value,
+  onChange,
+}: {
+  routes: RouteInfo[]
+  value: string
+  onChange: (v: string) => void
+}) {
+  const items = useMemo<ServiceOption[]>(
+    () =>
+      routes.map((r) => ({
+        value: `${r.containerId}:${r.index}`,
+        label: `${r.name} (${r.forwardHost || '?'}:${r.forwardPort ?? '?'})`,
+      })),
+    [routes],
+  )
+  const selected = items.find((i) => i.value === value) ?? null
+
+  return (
+    <Combobox
+      items={items}
+      value={selected}
+      onValueChange={(item) => onChange(item?.value ?? '')}
+      itemToStringLabel={(item) => item.label}
+      isItemEqualToValue={(a, b) => a.value === b.value}
+    >
+      <ComboboxInput
+        placeholder="Select a service…"
+        className="w-full"
+        showClear={!!value}
+      />
+      <ComboboxContent>
+        <ComboboxEmpty>No services available</ComboboxEmpty>
+        <ComboboxList>
+          {(item) => (
+            <ComboboxItem key={item.value} value={item}>
+              {item.label}
+            </ComboboxItem>
+          )}
+        </ComboboxList>
+      </ComboboxContent>
+    </Combobox>
   )
 }

@@ -2,6 +2,14 @@ import { useCallback, useEffect, useState } from 'react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import {
+  Combobox,
+  ComboboxContent,
+  ComboboxEmpty,
+  ComboboxInput,
+  ComboboxItem,
+  ComboboxList,
+} from '@/components/ui/combobox'
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -131,15 +139,7 @@ export function TunnelsPage() {
             </div>
             <div className="grid gap-1.5">
               <Label htmlFor="scheme">Upstream scheme</Label>
-              <select
-                id="scheme"
-                className="flex h-9 w-28 rounded-md border bg-transparent px-3 text-sm"
-                value={scheme}
-                onChange={(e) => setScheme(e.target.value)}
-              >
-                <option value="http">http</option>
-                <option value="https">https</option>
-              </select>
+              <SchemeCombobox id="scheme" value={scheme} onChange={setScheme} className="w-28" />
             </div>
 
             <div className="grid gap-1.5">
@@ -227,14 +227,7 @@ export function TunnelsPage() {
             <div className="grid grid-cols-3 gap-2">
               <div className="grid gap-1.5">
                 <Label>Scheme</Label>
-                <select
-                  className="flex h-9 w-full rounded-md border bg-transparent px-3 text-sm"
-                  value={editScheme}
-                  onChange={(e) => setEditScheme(e.target.value)}
-                >
-                  <option value="http">http</option>
-                  <option value="https">https</option>
-                </select>
+                <SchemeCombobox value={editScheme} onChange={setEditScheme} />
               </div>
               <div className="col-span-2 grid gap-1.5">
                 <Label>Forward host</Label>
@@ -258,5 +251,34 @@ export function TunnelsPage() {
         </DialogContent>
       </Dialog>
     </div>
+  )
+}
+
+function SchemeCombobox({
+  id,
+  value,
+  onChange,
+  className,
+}: {
+  id?: string
+  value: string
+  onChange: (v: string) => void
+  className?: string
+}) {
+  const items = ['http', 'https']
+  return (
+    <Combobox items={items} value={value || null} onValueChange={(v) => onChange(v ?? 'http')}>
+      <ComboboxInput id={id} placeholder="http" className={className ?? 'w-full'} />
+      <ComboboxContent>
+        <ComboboxEmpty>No options</ComboboxEmpty>
+        <ComboboxList>
+          {(item) => (
+            <ComboboxItem key={item} value={item}>
+              {item}
+            </ComboboxItem>
+          )}
+        </ComboboxList>
+      </ComboboxContent>
+    </Combobox>
   )
 }

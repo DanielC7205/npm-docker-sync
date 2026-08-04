@@ -12,6 +12,14 @@ import {
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import {
+  Combobox,
+  ComboboxContent,
+  ComboboxEmpty,
+  ComboboxInput,
+  ComboboxItem,
+  ComboboxList,
+} from '@/components/ui/combobox'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
@@ -793,18 +801,14 @@ function TlsSection({
             Fallback when Force SSL is on and no domain map or NPMplus domain match is found.
           </p>
         </div>
-        <select
+        <CertCombobox
           id="NPM_PROXY_DEFAULT_CERTIFICATE_ID"
-          className="flex h-9 w-full rounded-md border bg-transparent px-3 text-sm"
           disabled={!canEdit}
+          certs={certs}
           value={draft.NPM_PROXY_DEFAULT_CERTIFICATE_ID ?? ''}
-          onChange={(e) => setDraft((d) => ({ ...d, NPM_PROXY_DEFAULT_CERTIFICATE_ID: e.target.value }))}
-        >
-          <option value="">None (auto-match only)</option>
-          {certs.map((c) => (
-            <option key={c.id} value={String(c.id)}>{certLabel(c)}</option>
-          ))}
-        </select>
+          onChange={(v) => setDraft((d) => ({ ...d, NPM_PROXY_DEFAULT_CERTIFICATE_ID: v }))}
+          placeholder="None (auto-match only)"
+        />
       </div>
 
       <div className="grid gap-3 border-b border-border/60 pb-4 sm:grid-cols-[minmax(0,1fr)_minmax(220px,280px)] sm:items-start">
@@ -824,18 +828,14 @@ function TlsSection({
             SSL_VERSION_OR_CIPHER_MISMATCH.
           </p>
         </div>
-        <select
+        <CertCombobox
           id="TUNNEL_CERTIFICATE_ID"
-          className="flex h-9 w-full rounded-md border bg-transparent px-3 text-sm"
           disabled={!canEdit}
+          certs={certs}
           value={draft.TUNNEL_CERTIFICATE_ID ?? ''}
-          onChange={(e) => setDraft((d) => ({ ...d, TUNNEL_CERTIFICATE_ID: e.target.value }))}
-        >
-          <option value="">Auto (domain map / wildcard match)</option>
-          {certs.map((c) => (
-            <option key={c.id} value={String(c.id)}>{certLabel(c)}</option>
-          ))}
-        </select>
+          onChange={(v) => setDraft((d) => ({ ...d, TUNNEL_CERTIFICATE_ID: v }))}
+          placeholder="Auto (domain map / wildcard match)"
+        />
       </div>
 
       <div className="space-y-3">
@@ -869,21 +869,17 @@ function TlsSection({
                   setDomainRows(next)
                 }}
               />
-              <select
-                className="flex h-9 w-full rounded-md border bg-transparent px-3 text-sm"
+              <CertCombobox
                 disabled={!canEdit}
+                certs={certs}
                 value={row.certId}
-                onChange={(e) => {
+                onChange={(v) => {
                   const next = [...domainRows]
-                  next[i] = { ...next[i], certId: e.target.value }
+                  next[i] = { ...next[i], certId: v }
                   setDomainRows(next)
                 }}
-              >
-                <option value="">Select certificate…</option>
-                {certs.map((c) => (
-                  <option key={c.id} value={String(c.id)}>{certLabel(c)}</option>
-                ))}
-              </select>
+                placeholder="Select certificate…"
+              />
               <Button
                 type="button"
                 variant="outline"
@@ -913,5 +909,56 @@ function TlsSection({
         )}
       </div>
     </div>
+  )
+}
+
+function CertCombobox({
+  id,
+  certs,
+  value,
+  onChange,
+  placeholder,
+  disabled = false,
+}: {
+  id?: string
+  certs: CertificateInfo[]
+  value: string
+  onChange: (v: string) => void
+  placeholder: string
+  disabled?: boolean
+}) {
+  const items = useMemo(
+    () => certs.map((c) => ({ value: String(c.id), label: certLabel(c) })),
+    [certs],
+  )
+  const selected = items.find((i) => i.value === value) ?? null
+
+  return (
+    <Combobox
+      items={items}
+      value={selected}
+      onValueChange={(item) => onChange(item?.value ?? '')}
+      itemToStringLabel={(item) => item.label}
+      isItemEqualToValue={(a, b) => a.value === b.value}
+      disabled={disabled}
+    >
+      <ComboboxInput
+        id={id}
+        placeholder={placeholder}
+        className="w-full"
+        disabled={disabled}
+        showClear={!!value}
+      />
+      <ComboboxContent>
+        <ComboboxEmpty>No certificates found</ComboboxEmpty>
+        <ComboboxList>
+          {(item) => (
+            <ComboboxItem key={item.value} value={item}>
+              {item.label}
+            </ComboboxItem>
+          )}
+        </ComboboxList>
+      </ComboboxContent>
+    </Combobox>
   )
 }

@@ -14,6 +14,14 @@ import {
   Shield,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import {
+  Combobox,
+  ComboboxContent,
+  ComboboxEmpty,
+  ComboboxInput,
+  ComboboxItem,
+  ComboboxList,
+} from '@/components/ui/combobox'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -31,6 +39,8 @@ import {
 } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { CustomLocationsEditor } from '@/components/CustomLocationsEditor'
+
+type LabeledOption = { value: string; label: string }
 
 const AUTH_OPTIONS = ['none', 'authentik', 'authentik-send-basic-auth', 'oauth2proxy', 'authelia', 'tinyauth', 'anubis']
 const SELFHST_CDN = 'https://cdn.jsdelivr.net/gh/selfhst/icons/png'
@@ -303,14 +313,12 @@ export function RouteEditDialog({
                 />
               </Field>
               <Field label="Scheme" description="http or https to the upstream.">
-                <select
-                  className="flex h-9 w-full rounded-md border bg-transparent px-3 text-sm"
+                <SimpleCombobox
                   value={scheme}
-                  onChange={(e) => setScheme(e.target.value)}
-                >
-                  <option value="http">http</option>
-                  <option value="https">https</option>
-                </select>
+                  onChange={setScheme}
+                  items={['http', 'https']}
+                  placeholder="http"
+                />
               </Field>
             </div>
             <div className="flex flex-wrap items-center gap-2 pt-1">
@@ -341,19 +349,17 @@ export function RouteEditDialog({
 
           <Section icon={Shield} title="TLS & access" hint="Certificate, redirects, and optional auth_request.">
             <Field label="TLS certificate" description="Loaded from NPMplus. Selecting a cert enables Force SSL.">
-              <select
-                className="flex h-9 w-full rounded-md border bg-transparent px-3 text-sm"
+              <LabeledCombobox
                 value={certId}
-                onChange={(e) => {
-                  setCertId(e.target.value)
-                  if (e.target.value) setSslForced(true)
+                onChange={(v) => {
+                  setCertId(v)
+                  if (v) setSslForced(true)
                 }}
-              >
-                <option value="">None (HTTP only / auto-match)</option>
-                {certs.map((c) => (
-                  <option key={c.id} value={String(c.id)}>{certLabel(c)}</option>
-                ))}
-              </select>
+                items={certs.map((c) => ({ value: String(c.id), label: certLabel(c) }))}
+                placeholder="None (HTTP only / auto-match)"
+                emptyText="No certificates found"
+                allowClear
+              />
             </Field>
             <div className="grid gap-2 sm:grid-cols-2">
               <Toggle label="Force SSL" checked={sslForced} onChange={setSslForced} />
@@ -369,13 +375,12 @@ export function RouteEditDialog({
             />
             {!authExempt && (
               <Field label="Auth request" description="NPMplus auth_request provider for this host.">
-                <select
-                  className="flex h-9 w-full rounded-md border bg-transparent px-3 text-sm"
+                <SimpleCombobox
                   value={authRequest}
-                  onChange={(e) => setAuthRequest(e.target.value)}
-                >
-                  {AUTH_OPTIONS.map((o) => <option key={o} value={o}>{o}</option>)}
-                </select>
+                  onChange={setAuthRequest}
+                  items={AUTH_OPTIONS}
+                  placeholder="none"
+                />
               </Field>
             )}
           </Section>
@@ -472,6 +477,107 @@ function Field({
   )
 }
 
+function SimpleCombobox({
+  value,
+  onChange,
+  items,
+  placeholder,
+  emptyText = 'No matches',
+  inputMode,
+  allowClear = false,
+  creatable = false,
+}: {
+  value: string
+  onChange: (v: string) => void
+  items: string[]
+  placeholder?: string
+  emptyText?: string
+  inputMode?: React.HTMLAttributes<HTMLInputElement>['inputMode']
+  allowClear?: boolean
+  /** Allow typing values that aren’t in the list (ports/hosts). */
+  creatable?: boolean
+}) {
+  const options = useMemo(() => {
+    if (creatable && value && !items.includes(value)) return [value, ...items]
+    return items
+  }, [creatable, items, value])
+
+  return (
+    <Combobox
+      items={options}
+      value={value || null}
+      onValueChange={(v) => onChange(v ?? '')}
+      {...(creatable
+        ? {
+            inputValue: value,
+            onInputValueChange: (next: string) => onChange(next),
+          }
+        : {})}
+    >
+      <ComboboxInput
+        placeholder={placeholder}
+        className="w-full"
+        inputMode={inputMode}
+        showClear={allowClear && !!value}
+      />
+      <ComboboxContent>
+        <ComboboxEmpty>{creatable ? 'Type a custom value' : emptyText}</ComboboxEmpty>
+        <ComboboxList>
+          {(item) => (
+            <ComboboxItem key={item} value={item}>
+              {item}
+            </ComboboxItem>
+          )}
+        </ComboboxList>
+      </ComboboxContent>
+    </Combobox>
+  )
+}
+
+function LabeledCombobox({
+  value,
+  onChange,
+  items,
+  placeholder,
+  emptyText = 'No matches',
+  allowClear = false,
+}: {
+  value: string
+  onChange: (v: string) => void
+  items: LabeledOption[]
+  placeholder?: string
+  emptyText?: string
+  allowClear?: boolean
+}) {
+  const selected = items.find((i) => i.value === value) ?? null
+
+  return (
+    <Combobox
+      items={items}
+      value={selected}
+      onValueChange={(item) => onChange(item?.value ?? '')}
+      itemToStringLabel={(item) => item.label}
+      isItemEqualToValue={(a, b) => a.value === b.value}
+    >
+      <ComboboxInput
+        placeholder={placeholder}
+        className="w-full"
+        showClear={allowClear && !!value}
+      />
+      <ComboboxContent>
+        <ComboboxEmpty>{emptyText}</ComboboxEmpty>
+        <ComboboxList>
+          {(item) => (
+            <ComboboxItem key={item.value} value={item}>
+              {item.label}
+            </ComboboxItem>
+          )}
+        </ComboboxList>
+      </ComboboxContent>
+    </Combobox>
+  )
+}
+
 function PortCombobox({
   value,
   onChange,
@@ -481,37 +587,21 @@ function PortCombobox({
   onChange: (v: string) => void
   candidates: number[]
 }) {
-  const listId = 'upstream-port-options'
-  const options = [...new Set(candidates)].sort((a, b) => a - b)
+  const items = useMemo(
+    () => [...new Set(candidates)].sort((a, b) => a - b).map(String),
+    [candidates],
+  )
+
   return (
-    <div className="space-y-1.5">
-      {options.length > 0 && (
-        <select
-          className="flex h-9 w-full rounded-md border bg-transparent px-3 text-sm"
-          value={options.some((p) => String(p) === value) ? value : ''}
-          onChange={(e) => {
-            if (e.target.value) onChange(e.target.value)
-          }}
-        >
-          <option value="">Pick detected port…</option>
-          {options.map((p) => (
-            <option key={p} value={String(p)}>{p}</option>
-          ))}
-        </select>
-      )}
-      <Input
-        list={listId}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        inputMode="numeric"
-        placeholder={options[0] ? String(options[0]) : '8080'}
-      />
-      <datalist id={listId}>
-        {options.map((p) => (
-          <option key={p} value={String(p)} />
-        ))}
-      </datalist>
-    </div>
+    <SimpleCombobox
+      value={value}
+      onChange={onChange}
+      items={items}
+      placeholder={items[0] ?? '8080'}
+      inputMode="numeric"
+      creatable
+      allowClear={!!value}
+    />
   )
 }
 
@@ -524,39 +614,53 @@ function HostCombobox({
   onChange: (v: string) => void
   candidates: HostCandidate[]
 }) {
-  const listId = 'upstream-host-options'
+  const items = useMemo(() => {
+    const seen = new Set<string>()
+    const opts: LabeledOption[] = []
+    for (const c of candidates) {
+      if (seen.has(c.host)) continue
+      seen.add(c.host)
+      opts.push({ value: c.host, label: `${c.host} — ${c.label}` })
+    }
+    if (value && !seen.has(value)) {
+      opts.unshift({ value, label: value })
+    }
+    return opts
+  }, [candidates, value])
+
   return (
-    <div className="space-y-1.5">
-      {candidates.length > 0 && (
-        <select
-          className="flex h-9 w-full rounded-md border bg-transparent px-3 text-sm"
-          value={candidates.some((c) => c.host === value) ? value : ''}
-          onChange={(e) => {
-            if (e.target.value) onChange(e.target.value)
-          }}
-        >
-          <option value="">Pick detected host…</option>
-          {candidates.map((c) => (
-            <option key={`${c.source}:${c.host}`} value={c.host}>
-              {c.host} — {c.label}
-            </option>
-          ))}
-        </select>
-      )}
-      <Input
-        list={listId}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
+    <Combobox
+      items={items}
+      value={items.find((i) => i.value === value) ?? null}
+      onValueChange={(item) => onChange(item?.value ?? '')}
+      inputValue={value}
+      onInputValueChange={onChange}
+      itemToStringLabel={(item) => item.value}
+      isItemEqualToValue={(a, b) => a.value === b.value}
+    >
+      <ComboboxInput
         placeholder="container-name or IP"
+        className="w-full"
+        showClear={!!value}
       />
-      <datalist id={listId}>
-        {candidates.map((c) => (
-          <option key={`${c.source}:${c.host}`} value={c.host}>
-            {c.label}
-          </option>
-        ))}
-      </datalist>
-    </div>
+      <ComboboxContent>
+        <ComboboxEmpty>{candidates.length ? 'Type a custom host' : 'Type a host'}</ComboboxEmpty>
+        <ComboboxList>
+          {(item) => (
+            <ComboboxItem key={item.value} value={item}>
+              <span className="flex min-w-0 flex-col gap-0.5">
+                <span className="truncate font-medium">{item.value}</span>
+                {item.label !== item.value && (
+                  <span className="truncate text-xs text-muted-foreground">
+                    {item.label.includes(' — ') ? item.label.split(' — ').slice(1).join(' — ') : item.label}
+                  </span>
+                )}
+              </span>
+            </ComboboxItem>
+          )}
+        </ComboboxList>
+      </ComboboxContent>
+    </Combobox>
   )
 }
 
