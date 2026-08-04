@@ -8,6 +8,7 @@ export interface TunnelListItem {
   forwardHost?: string;
   label?: string | null;
   domain?: string;
+  disableOnExpire?: boolean | null;
 }
 
 export function formatExpiry(expiresAt: string, now = Date.now()): {
@@ -62,6 +63,9 @@ export class TunnelItem extends vscode.TreeItem {
         '',
         `Forward: \`${tunnel.forwardHost ?? '?'}:${tunnel.forwardPort}\``,
         `Expires: ${expiry.full} (${expiry.short})`,
+        tunnel.disableOnExpire
+          ? 'Persist mode: on expiry the tunnel is disabled (kept)'
+          : 'Auto mode: on expiry the tunnel is deleted',
         '',
         'Use **Extend** to add more time.',
       ].join('\n'),

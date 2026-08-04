@@ -50,6 +50,7 @@ public class SettingsStore
             Directory.CreateDirectory(dir);
 
         Initialize();
+        EnsureTunnelColumns();
         _logger.LogInformation("Settings store ready at {Path}", _dbPath);
     }
 
@@ -82,6 +83,7 @@ public class SettingsStore
                     forward_port INTEGER NOT NULL,
                     forward_scheme TEXT NOT NULL,
                     npm_host_id INTEGER,
+                    disable_on_expire INTEGER NOT NULL DEFAULT 0,
                     expires_at TEXT NOT NULL,
                     created_by TEXT,
                     label TEXT,
@@ -89,6 +91,32 @@ public class SettingsStore
                 );
                 """;
             cmd.ExecuteNonQuery();
+        }
+    }
+
+    private void EnsureTunnelColumns()
+    {
+        lock (_lock)
+        {
+            using var conn = Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "PRAGMA table_info(tunnels);";
+            using var reader = cmd.ExecuteReader();
+            var columns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            while (reader.Read())
+            {
+                // PRAGMA table_info columns:
+                // 0: cid, 1: name, 2: type, ...
+                if (!reader.IsDBNull(1))
+                    columns.Add(reader.GetString(1));
+            }
+
+            if (!columns.Contains("disable_on_expire"))
+            {
+                using var alter = conn.CreateCommand();
+                alter.CommandText = "ALTER TABLE tunnels ADD COLUMN disable_on_expire INTEGER NOT NULL DEFAULT 0;";
+                alter.ExecuteNonQuery();
+            }
         }
     }
 
@@ -318,8 +346,8 @@ public class SettingsStore
             using var cmd = conn.CreateCommand();
             cmd.CommandText = """
                 INSERT INTO tunnels(id, slug, domain, forward_host, forward_port, forward_scheme,
-                    npm_host_id, expires_at, created_by, label, created_at)
-                VALUES ($id, $slug, $domain, $host, $port, $scheme, $npm, $exp, $by, $label, $created)
+                    npm_host_id, disable_on_expire, expires_at, created_by, label, created_at)
+                VALUES ($id, $slug, $domain, $host, $port, $scheme, $npm, $disable, $exp, $by, $label, $created)
                 """;
             cmd.Parameters.AddWithValue("$id", tunnel.Id);
             cmd.Parameters.AddWithValue("$slug", tunnel.Slug);
@@ -328,6 +356,7 @@ public class SettingsStore
             cmd.Parameters.AddWithValue("$port", tunnel.ForwardPort);
             cmd.Parameters.AddWithValue("$scheme", tunnel.ForwardScheme);
             cmd.Parameters.AddWithValue("$npm", (object?)tunnel.NpmHostId ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$disable", tunnel.DisableOnExpire ? 1 : 0);
             cmd.Parameters.AddWithValue("$exp", tunnel.ExpiresAt.ToString("o"));
             cmd.Parameters.AddWithValue("$by", (object?)tunnel.CreatedBy ?? DBNull.Value);
             cmd.Parameters.AddWithValue("$label", (object?)tunnel.Label ?? DBNull.Value);
@@ -343,7 +372,7 @@ public class SettingsStore
         {
             using var conn = Open();
             using var cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT id, slug, domain, forward_host, forward_port, forward_scheme, npm_host_id, expires_at, created_by, label, created_at FROM tunnels ORDER BY created_at DESC";
+            cmd.CommandText = "SELECT id, slug, domain, forward_host, forward_port, forward_scheme, npm_host_id, disable_on_expire, expires_at, created_by, label, created_at FROM tunnels ORDER BY created_at DESC";
             using var reader = cmd.ExecuteReader();
             while (reader.Read())
                 list.Add(ReadTunnel(reader));
@@ -358,7 +387,7 @@ public class SettingsStore
         {
             using var conn = Open();
             using var cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT id, slug, domain, forward_host, forward_port, forward_scheme, npm_host_id, expires_at, created_by, label, created_at FROM tunnels WHERE id = $id";
+            cmd.CommandText = "SELECT id, slug, domain, forward_host, forward_port, forward_scheme, npm_host_id, disable_on_expire, expires_at, created_by, label, created_at FROM tunnels WHERE id = $id";
             cmd.Parameters.AddWithValue("$id", id);
             using var reader = cmd.ExecuteReader();
             if (!reader.Read())
@@ -405,10 +434,11 @@ public class SettingsStore
         ForwardPort = reader.GetInt32(4),
         ForwardScheme = reader.GetString(5),
         NpmHostId = reader.IsDBNull(6) ? null : reader.GetInt32(6),
-        ExpiresAt = DateTime.Parse(reader.GetString(7)).ToUniversalTime(),
-        CreatedBy = reader.IsDBNull(8) ? null : reader.GetString(8),
-        Label = reader.IsDBNull(9) ? null : reader.GetString(9),
-        CreatedAt = DateTime.Parse(reader.GetString(10)).ToUniversalTime(),
+        DisableOnExpire = !reader.IsDBNull(7) && reader.GetInt32(7) != 0,
+        ExpiresAt = DateTime.Parse(reader.GetString(8)).ToUniversalTime(),
+        CreatedBy = reader.IsDBNull(9) ? null : reader.GetString(9),
+        Label = reader.IsDBNull(10) ? null : reader.GetString(10),
+        CreatedAt = DateTime.Parse(reader.GetString(11)).ToUniversalTime(),
     };
 
     private static JsonSerializerOptions JsonOpts() => new()
@@ -451,6 +481,7 @@ public class TunnelRecord
     public int ForwardPort { get; set; }
     public string ForwardScheme { get; set; } = "http";
     public int? NpmHostId { get; set; }
+    public bool DisableOnExpire { get; set; }
     public DateTime ExpiresAt { get; set; }
     public string? CreatedBy { get; set; }
     public string? Label { get; set; }

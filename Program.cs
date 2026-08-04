@@ -342,6 +342,7 @@ app.MapGet("/api/tunnels", (TunnelService tunnels) =>
         expiresAt = t.ExpiresAt,
         t.Label,
         t.CreatedBy,
+        disableOnExpire = t.DisableOnExpire,
         createdAt = t.CreatedAt,
     });
     return Results.Ok(list);
@@ -352,7 +353,15 @@ app.MapPost("/api/tunnels", async (TunnelCreateRequest body, TunnelService tunne
     try
     {
         var createdBy = ctx.User.Identity?.Name ?? "api";
-        var tunnel = await tunnels.CreateAsync(body.Port, body.Scheme, body.Host, body.TtlMinutes, body.Label, createdBy, ct);
+        var tunnel = await tunnels.CreateAsync(
+            body.Port,
+            body.Scheme,
+            body.Host,
+            body.TtlMinutes,
+            body.Label,
+            body.DisableOnExpire ?? false,
+            createdBy,
+            ct);
         return Results.Ok(new
         {
             tunnel.Id,
@@ -362,6 +371,7 @@ app.MapPost("/api/tunnels", async (TunnelCreateRequest body, TunnelService tunne
             expiresAt = tunnel.ExpiresAt,
             tunnel.ForwardHost,
             tunnel.ForwardPort,
+            disableOnExpire = tunnel.DisableOnExpire,
         });
     }
     catch (Exception ex)
@@ -383,12 +393,12 @@ app.MapDelete("/api/tunnels/{id}", async (string id, TunnelService tunnels, Canc
     }
 });
 
-app.MapPost("/api/tunnels/{id}/extend", (string id, TunnelExtendRequest? body, TunnelService tunnels) =>
+app.MapPost("/api/tunnels/{id}/extend", (string id, TunnelExtendRequest? body, TunnelService tunnels, CancellationToken ct) =>
 {
     try
     {
-        var tunnel = tunnels.Extend(id, body?.TtlMinutes);
-        return Results.Ok(new { tunnel.Id, url = $"https://{tunnel.Domain}", expiresAt = tunnel.ExpiresAt });
+        var tunnel = tunnels.ExtendAsync(id, body?.TtlMinutes, ct).GetAwaiter().GetResult();
+        return Results.Ok(new { tunnel.Id, url = $"https://{tunnel.Domain}", expiresAt = tunnel.ExpiresAt, disableOnExpire = tunnel.DisableOnExpire });
     }
     catch (Exception ex)
     {
@@ -440,7 +450,7 @@ finally
 }
 
 public record EnableRequest(bool Enabled);
-public record TunnelCreateRequest(int Port, string? Scheme, string? Host, int? TtlMinutes, string? Label);
+public record TunnelCreateRequest(int Port, string? Scheme, string? Host, int? TtlMinutes, string? Label, bool? DisableOnExpire);
 public record TunnelExtendRequest(int? TtlMinutes);
 
 class ShortSourceContextEnricher : ILogEventEnricher

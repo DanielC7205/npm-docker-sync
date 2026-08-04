@@ -3,12 +3,17 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Switch } from '@/components/ui/switch'
 import { createTunnel, deleteTunnel, extendTunnel, fetchTunnels, type TunnelInfo } from '@/lib/api'
 
 export function TunnelsPage() {
   const [tunnels, setTunnels] = useState<TunnelInfo[]>([])
   const [port, setPort] = useState('3000')
   const [label, setLabel] = useState('')
+  const [scheme, setScheme] = useState('http')
+  const [ttlMinutes, setTtlMinutes] = useState('120')
+  const [forwardHost, setForwardHost] = useState('')
+  const [disableOnExpire, setDisableOnExpire] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
@@ -32,7 +37,11 @@ export function TunnelsPage() {
     try {
       const created = await createTunnel({
         port: Number(port),
+        scheme,
         label: label || undefined,
+        ttlMinutes: ttlMinutes ? Number(ttlMinutes) : undefined,
+        host: forwardHost || undefined,
+        disableOnExpire,
       })
       await navigator.clipboard.writeText(created.url).catch(() => undefined)
       await load()
@@ -67,7 +76,52 @@ export function TunnelsPage() {
             <Label htmlFor="label">Label</Label>
             <Input id="label" className="w-48" value={label} onChange={(e) => setLabel(e.target.value)} placeholder="optional" />
           </div>
-          <Button disabled={busy} onClick={() => void onCreate()}>Create & copy URL</Button>
+          <div className="grid gap-1.5">
+            <Label htmlFor="scheme">Upstream scheme</Label>
+            <select
+              id="scheme"
+              className="flex h-9 w-28 rounded-md border bg-transparent px-3 text-sm"
+              value={scheme}
+              onChange={(e) => setScheme(e.target.value)}
+            >
+              <option value="http">http</option>
+              <option value="https">https</option>
+            </select>
+          </div>
+
+          <div className="grid gap-1.5">
+            <Label htmlFor="ttlMinutes">TTL (minutes)</Label>
+            <Input
+              id="ttlMinutes"
+              className="w-28"
+              value={ttlMinutes}
+              onChange={(e) => setTtlMinutes(e.target.value)}
+              inputMode="numeric"
+            />
+          </div>
+
+          <div className="flex items-center gap-3 rounded-md border px-3 py-2">
+            <div className="grid gap-0.5">
+              <Label htmlFor="disableOnExpire" className="text-sm">Persist</Label>
+              <p className="text-xs text-muted-foreground">Disable on expiry (keep record)</p>
+            </div>
+            <Switch id="disableOnExpire" checked={disableOnExpire} onCheckedChange={setDisableOnExpire} />
+          </div>
+
+          <div className="grid gap-1.5">
+            <Label htmlFor="forwardHost">Forward host (optional)</Label>
+            <Input
+              id="forwardHost"
+              className="w-56"
+              value={forwardHost}
+              onChange={(e) => setForwardHost(e.target.value)}
+              placeholder="Uses TUNNEL_FORWARD_HOST if empty"
+            />
+          </div>
+
+          <Button disabled={busy} onClick={() => void onCreate()}>
+            Create & copy URL
+          </Button>
         </CardContent>
       </Card>
 
@@ -80,6 +134,7 @@ export function TunnelsPage() {
                 <p className="text-xs text-muted-foreground">
                   {t.forwardScheme}://{t.forwardHost}:{t.forwardPort}
                   {t.label ? ` · ${t.label}` : ''} · expires {new Date(t.expiresAt).toLocaleString()}
+                  {t.disableOnExpire ? ' · persist/disable' : ''}
                 </p>
               </div>
               <div className="flex gap-2">

@@ -31,6 +31,7 @@ public class TunnelService
         string? host,
         int? ttlMinutes,
         string? label,
+        bool disableOnExpire,
         string? createdBy,
         CancellationToken cancellationToken)
     {
@@ -110,6 +111,7 @@ public class TunnelService
             ForwardScheme = forwardScheme,
             NpmHostId = hostCreated.Id,
             ExpiresAt = DateTime.UtcNow.AddMinutes(ttl),
+            DisableOnExpire = disableOnExpire,
             CreatedBy = createdBy,
             Label = label,
             CreatedAt = DateTime.UtcNow,
@@ -177,7 +179,7 @@ public class TunnelService
         _settings.DeleteTunnel(id);
     }
 
-    public TunnelRecord Extend(string id, int? ttlMinutes)
+    public async Task<TunnelRecord> ExtendAsync(string id, int? ttlMinutes, CancellationToken cancellationToken)
     {
         var tunnel = _settings.GetTunnel(id)
             ?? throw new InvalidOperationException("Tunnel not found");
@@ -192,6 +194,22 @@ public class TunnelService
             tunnel.ExpiresAt = maxExpiry;
 
         _settings.UpdateTunnel(tunnel);
+
+        // If the tunnel was persisted, expiry would have disabled it in NPMplus.
+        // Re-enable when extending so it becomes usable again immediately.
+        if (tunnel.NpmHostId.HasValue)
+        {
+            try
+            {
+                await _npm.SetProxyHostEnabledAsync(tunnel.NpmHostId.Value, true, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to re-enable NPM host {HostId} for tunnel {Id}",
+                    tunnel.NpmHostId, id);
+            }
+        }
+
         return tunnel;
     }
 
@@ -206,6 +224,13 @@ public class TunnelService
             _logger.LogInformation("Expiring tunnel {Domain}", tunnel.Domain);
             try
             {
+                if (tunnel.DisableOnExpire && tunnel.NpmHostId.HasValue)
+                {
+                    // Persist mode: keep the tunnel record, but disable the proxy host in NPMplus.
+                    await _npm.SetProxyHostEnabledAsync(tunnel.NpmHostId.Value, false, cancellationToken);
+                    continue;
+                }
+
                 await DeleteAsync(tunnel.Id, cancellationToken);
             }
             catch (Exception ex)

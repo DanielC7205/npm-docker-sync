@@ -161,6 +161,21 @@
           "type": "string",
           "default": "",
           "description": "Optional override for tunnel forward host. When empty, the extension auto-detects this machine's Tailscale/LAN IPv4."
+        },
+        "npmDockerSync.tunnelScheme": {
+          "type": "string",
+          "default": "http",
+          "description": "Default upstream scheme used when creating a tunnel (http/https)."
+        },
+        "npmDockerSync.tunnelTtlMinutes": {
+          "type": "number",
+          "default": 120,
+          "description": "Default TTL (minutes) for newly created tunnels."
+        },
+        "npmDockerSync.tunnelDisableOnExpire": {
+          "type": "boolean",
+          "default": false,
+          "description": "Default persistence behavior for tunnels: if true, tunnels are disabled on expiry instead of deleted."
         }
       }
     }

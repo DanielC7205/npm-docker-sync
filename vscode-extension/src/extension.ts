@@ -475,6 +475,74 @@ async function sharePort() {
   }
   if (!portStr) return;
 
+  const cfg = vscode.workspace.getConfiguration('npmDockerSync');
+  const defaultScheme = (cfg.get<string>('tunnelScheme') || 'http').trim();
+  const defaultTtl = Number(cfg.get<number>('tunnelTtlMinutes') ?? 120);
+  const defaultDisableOnExpire = !!cfg.get<boolean>('tunnelDisableOnExpire');
+
+  const schemeChoice = await vscode.window.showQuickPick(
+    [
+      { label: 'http', value: 'http' },
+      { label: 'https', value: 'https' },
+    ],
+    { placeHolder: `Upstream scheme (default: ${defaultScheme})` },
+  );
+  if (!schemeChoice) return;
+
+  const ttlOptions: (vscode.QuickPickItem & { minutes: number; isCustom?: boolean })[] = [
+    { label: '15 minutes', minutes: 15 },
+    { label: '30 minutes', minutes: 30 },
+    { label: '60 minutes', minutes: 60 },
+    { label: '2 hours', minutes: 120 },
+    { label: '4 hours', minutes: 240 },
+    { label: '8 hours', minutes: 480 },
+    { label: '24 hours', minutes: 1440 },
+    { label: 'Custom…', minutes: 0, isCustom: true },
+  ];
+
+  const ttlPick = await vscode.window.showQuickPick(ttlOptions, {
+    placeHolder: `TTL (default: ${defaultTtl} minutes)`,
+  });
+  if (!ttlPick) return;
+
+  let ttlMinutes = defaultTtl;
+  if (ttlPick.isCustom) {
+    const raw = await vscode.window.showInputBox({
+      prompt: 'TTL minutes',
+      value: String(defaultTtl),
+      validateInput: (v) => {
+        const n = Number(v);
+        if (!Number.isFinite(n) || n < 5 || n > 10080) return 'Enter 5-10080';
+        return undefined;
+      },
+    });
+    if (!raw) return;
+    ttlMinutes = Number(raw);
+  } else {
+    ttlMinutes = ttlPick.minutes;
+  }
+
+  const persistPick = await vscode.window.showQuickPick(
+    [
+      { label: defaultDisableOnExpire ? 'Persist (disable on expiry)' : 'Persist (disable on expiry)', disable: true },
+      { label: defaultDisableOnExpire ? 'Auto delete on expiry' : 'Auto delete on expiry', disable: false },
+    ],
+    { placeHolder: 'On expiry: disable (persist) or delete?' },
+  );
+  if (!persistPick) return;
+  const disableOnExpire = persistPick.disable;
+
+  const rememberPick = await vscode.window.showQuickPick(['Use once', 'Remember for next time'], {
+    placeHolder: 'Remember these tunnel defaults?',
+  });
+  if (!rememberPick) return;
+
+  if (rememberPick === 'Remember for next time') {
+    await cfg.update('tunnelScheme', schemeChoice.value, vscode.ConfigurationTarget.Global);
+    await cfg.update('tunnelTtlMinutes', ttlMinutes, vscode.ConfigurationTarget.Global);
+    await cfg.update('tunnelDisableOnExpire', disableOnExpire, vscode.ConfigurationTarget.Global);
+  }
+
   const label = await vscode.window.showInputBox({
     prompt: 'Tunnel name (used in the hostname)',
     value: project,
@@ -487,8 +555,11 @@ async function sharePort() {
       method: 'POST',
       body: JSON.stringify({
         port: Number(portStr),
+        scheme: schemeChoice.value,
+        ttlMinutes,
         label: (label || project).trim() || undefined,
         host,
+        disableOnExpire,
       }),
     });
     activeTunnel = tunnel;

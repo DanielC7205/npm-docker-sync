@@ -61,6 +61,7 @@ export interface TunnelInfo {
   forwardScheme: string
   npmHostId?: number | null
   expiresAt: string
+  disableOnExpire?: boolean | null
   label?: string | null
   createdBy?: string | null
   createdAt: string
@@ -138,7 +139,14 @@ export const syncRoute = (containerId: string) =>
   })
 
 export const fetchTunnels = () => api<TunnelInfo[]>('/api/tunnels')
-export const createTunnel = (body: { port: number; scheme?: string; host?: string; ttlMinutes?: number; label?: string }) =>
+export const createTunnel = (body: {
+  port: number
+  scheme?: string
+  host?: string
+  ttlMinutes?: number
+  label?: string
+  disableOnExpire?: boolean
+}) =>
   api<TunnelInfo>('/api/tunnels', { method: 'POST', body: JSON.stringify(body) })
 export const deleteTunnel = (id: string) =>
   api<{ success: boolean }>(`/api/tunnels/${encodeURIComponent(id)}`, { method: 'DELETE' })
