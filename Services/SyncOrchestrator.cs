@@ -170,7 +170,17 @@ public class SyncOrchestrator
 
             var proxyConfigs = _labelParser.ParseLabels(labels);
             var streamConfigs = _labelParser.ParseStreamLabels(labels);
-            var currentLabelHash = ComputeLabelHash(labels);
+
+            if (proxyConfigs.Count == 0 && !_labelParser.IsExcluded(labels))
+            {
+                var auto = await TryBuildAutoBridgeConfigAsync(containerId, containerName, labels, cancellationToken);
+                if (auto != null)
+                    proxyConfigs[0] = auto;
+            }
+
+            var currentLabelHash = proxyConfigs.Count > 0 || streamConfigs.Count > 0
+                ? ComputeSyncHash(labels, proxyConfigs, streamConfigs)
+                : string.Empty;
 
             _lastProxyConfigs[containerId] = proxyConfigs;
 
@@ -202,7 +212,17 @@ public class SyncOrchestrator
             }
             else if (string.IsNullOrEmpty(currentLabelHash))
             {
-                _logger.LogInformation("No sync labels found for container {ContainerName}", containerName);
+                _logger.LogDebug("No sync labels or auto-bridge candidate for container {ContainerName}", containerName);
+                // If we previously managed this container via auto-bridge and it's no longer eligible, clean up
+                if (_containerProxyMap.Keys.Any(k => k.StartsWith($"{containerId}:")) ||
+                    _containerStreamMap.Keys.Any(k => k.StartsWith($"{containerId}:")))
+                {
+                    await ProcessProxyHosts(containerId, containerName, new Dictionary<int, ProxyConfiguration>(), cancellationToken);
+                    await ProcessStreams(containerId, containerName, new Dictionary<int, StreamConfiguration>(), cancellationToken);
+                    _containerLabelHashes.TryRemove(containerId, out _);
+                    _lastProxyConfigs.TryRemove(containerId, out _);
+                }
+                return;
             }
             else
             {
@@ -220,6 +240,96 @@ public class SyncOrchestrator
         {
             _logger.LogError(ex, "Error processing container {ContainerId}", containerId);
         }
+    }
+
+    private async Task<ProxyConfiguration?> TryBuildAutoBridgeConfigAsync(
+        string containerId,
+        string containerName,
+        IDictionary<string, string> labels,
+        CancellationToken cancellationToken)
+    {
+        if (!_settings.GetBool("AUTO_BRIDGE_EXPOSED"))
+            return null;
+
+        var baseDomain = _settings.Get("PROXY_BASE_DOMAIN")?.Trim().TrimStart('.');
+        if (string.IsNullOrWhiteSpace(baseDomain))
+        {
+            _logger.LogDebug("AUTO_BRIDGE_EXPOSED is on but PROXY_BASE_DOMAIN is not set; skipping {Container}", containerName);
+            return null;
+        }
+
+        if (labels.TryGetValue("npm.proxy.autobridge", out var ab) &&
+            ab.Equals("false", StringComparison.OrdinalIgnoreCase))
+            return null;
+        if (labels.TryGetValue("proxy.autobridge", out ab) &&
+            ab.Equals("false", StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        var excludeRaw = _settings.Get("AUTO_BRIDGE_EXCLUDE")
+            ?? "npmplus,npm-docker-sync,nginx-proxy-manager";
+        var excludes = excludeRaw.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (excludes.Any(ex => containerName.Contains(ex, StringComparison.OrdinalIgnoreCase)))
+            return null;
+
+        var port = await _networkService.InferForwardPort(containerId, cancellationToken);
+        if (!port.HasValue)
+            return null;
+
+        var slug = IconResolver.ToSlug(containerName);
+        if (string.IsNullOrEmpty(slug))
+            return null;
+
+        var domain = $"{slug}.{baseDomain}";
+        _logger.LogInformation(
+            "Auto-bridging container {ContainerName} → {Domain}:{Port}",
+            containerName, domain, port.Value);
+
+        return new ProxyConfiguration
+        {
+            Index = 0,
+            DomainNames = new List<string> { domain },
+            ForwardPort = port,
+            ForwardScheme = "http",
+            SslForced = _settings.GetBool("NPM_PROXY_SSL_FORCE"),
+            CachingEnabled = _settings.GetBool("NPM_PROXY_CACHING"),
+            BlockExploits = _settings.GetBool("NPM_PROXY_BLOCK_EXPLOITS", true),
+            AllowWebsocketUpgrade = _settings.GetBool("NPM_PROXY_WEBSOCKETS"),
+            Http2Support = _settings.GetBool("NPM_PROXY_HTTP2"),
+            HstsEnabled = _settings.GetBool("NPM_PROXY_HSTS"),
+            HstsSubdomains = _settings.GetBool("NPM_PROXY_HSTS_SUBDOMAINS"),
+            LabelSource = ProxyLabelSource.GoDoxy,
+            Homepage = new HomepageInfo { Name = containerName, Category = "Auto", Show = true },
+        };
+    }
+
+    private string ComputeSyncHash(
+        IDictionary<string, string> labels,
+        Dictionary<int, ProxyConfiguration> proxies,
+        Dictionary<int, StreamConfiguration> streams)
+    {
+        var parts = new List<string>
+        {
+            ComputeLabelHash(labels),
+            $"ab={_settings.GetBool("AUTO_BRIDGE_EXPOSED")}",
+            $"bd={_settings.Get("PROXY_BASE_DOMAIN")}",
+            $"ssl={_settings.GetBool("NPM_PROXY_SSL_FORCE")}",
+        };
+
+        foreach (var (index, config) in proxies.OrderBy(p => p.Key))
+        {
+            parts.Add(
+                $"p{index}:{string.Join(",", config.DomainNames)}:{config.ForwardPort}:{config.SslForced}:{config.LabelSource}");
+        }
+
+        foreach (var (index, config) in streams.OrderBy(s => s.Key))
+            parts.Add($"s{index}:{config.IncomingPort}:{config.ForwardPort}");
+
+        var combined = string.Join("|", parts);
+        if (proxies.Count == 0 && streams.Count == 0)
+            return string.Empty;
+
+        return Convert.ToBase64String(System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(combined)));
     }
 
     public async Task SyncNowAsync(string containerId, CancellationToken cancellationToken)
@@ -293,6 +403,13 @@ public class SyncOrchestrator
             }
 
             var configs = _labelParser.ParseLabels(labels);
+            if (configs.Count == 0 && !_labelParser.IsExcluded(labels))
+            {
+                var auto = await TryBuildAutoBridgeConfigAsync(containerId, containerName, labels, cancellationToken);
+                if (auto != null)
+                    configs[0] = auto;
+            }
+
             if (configs.Count == 0)
                 continue;
 

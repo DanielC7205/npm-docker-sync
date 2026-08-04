@@ -12,17 +12,20 @@ public class DockerMonitorService : BackgroundService
     private readonly DockerClient _dockerClient;
     private readonly SyncOrchestrator _syncOrchestrator;
     private readonly DockerNetworkService _networkService;
+    private readonly SettingsStore _settings;
     private readonly string _dockerHost;
 
     public DockerMonitorService(
         ILogger<DockerMonitorService> logger,
         SyncOrchestrator syncOrchestrator,
         DockerNetworkService networkService,
+        SettingsStore settings,
         IConfiguration configuration)
     {
         _logger = logger;
         _syncOrchestrator = syncOrchestrator;
         _networkService = networkService;
+        _settings = settings;
         _dockerHost = configuration["DOCKER_HOST"] ?? "unix:///var/run/docker.sock";
 
         _dockerClient = new DockerClientConfiguration(new Uri(_dockerHost))
@@ -93,21 +96,25 @@ public class DockerMonitorService : BackgroundService
         _logger.LogInformation("Performing initial scan of containers");
 
         var containers = await _dockerClient.Containers.ListContainersAsync(
-            new ContainersListParameters { All = true },
+            new ContainersListParameters { All = false },
             stoppingToken);
 
+        var autoBridge = _settings.GetBool("AUTO_BRIDGE_EXPOSED");
+        var processed = 0;
         foreach (var container in containers)
         {
-            if (container.Labels != null && HasProxyLabels(container.Labels))
+            var labels = container.Labels ?? new Dictionary<string, string>();
+            var containerName = container.Names.FirstOrDefault()?.TrimStart('/') ?? container.ID;
+
+            if (HasProxyLabels(labels) || autoBridge)
             {
-                var containerName = container.Names.FirstOrDefault()?.TrimStart('/') ?? container.ID;
-                _logger.LogInformation("Found container with proxy labels: {ContainerName}", containerName);
-                await _syncOrchestrator.ProcessContainer(container.ID, containerName, container.Labels, stoppingToken);
+                _logger.LogInformation("Found container for sync: {ContainerName}", containerName);
+                await _syncOrchestrator.ProcessContainer(container.ID, containerName, labels, stoppingToken);
+                processed++;
             }
         }
 
-        _logger.LogInformation("Initial scan completed. Found {Count} containers with proxy labels",
-            containers.Count(c => c.Labels != null && HasProxyLabels(c.Labels)));
+        _logger.LogInformation("Initial scan completed. Processed {Count} containers", processed);
     }
 
     private async Task MonitorDockerEvents(CancellationToken stoppingToken)
@@ -156,12 +163,13 @@ public class DockerMonitorService : BackgroundService
             try
             {
                 var container = await _dockerClient.Containers.InspectContainerAsync(containerId, stoppingToken);
+                var labels = container.Config?.Labels ?? new Dictionary<string, string>();
+                var containerName = container.Name.TrimStart('/');
 
-                if (container.Config?.Labels != null)
+                if (HasProxyLabels(labels) || _settings.GetBool("AUTO_BRIDGE_EXPOSED"))
                 {
-                    var containerName = container.Name.TrimStart('/');
                     _logger.LogInformation("Container {Name} {Action}", containerName, action);
-                    await _syncOrchestrator.ProcessContainer(containerId, containerName, container.Config.Labels, stoppingToken);
+                    await _syncOrchestrator.ProcessContainer(containerId, containerName, labels, stoppingToken);
                 }
             }
             catch (Exception ex)
