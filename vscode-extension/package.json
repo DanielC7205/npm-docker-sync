@@ -2,38 +2,133 @@
   "name": "npm-docker-sync",
   "displayName": "NPM Docker Sync Tunnels",
   "description": "Share local workspace ports via temporary NPMplus tunnels",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "danielc7205",
   "engines": {
     "vscode": "^1.85.0"
   },
   "categories": ["Other"],
   "activationEvents": [
+    "onView:npmDockerSync.tunnelsView",
     "onCommand:npmDockerSync.sharePort",
     "onCommand:npmDockerSync.copyUrl",
     "onCommand:npmDockerSync.stopTunnel",
-    "onCommand:npmDockerSync.listTunnels"
+    "onCommand:npmDockerSync.listTunnels",
+    "onCommand:npmDockerSync.refreshTunnels"
   ],
   "main": "./out/extension.js",
   "contributes": {
+    "viewsContainers": {
+      "panel": [
+        {
+          "id": "npmDockerSync",
+          "title": "NPM Tunnels",
+          "icon": "media/tunnels.svg"
+        }
+      ]
+    },
+    "views": {
+      "npmDockerSync": [
+        {
+          "id": "npmDockerSync.tunnelsView",
+          "name": "Tunnels",
+          "contextualTitle": "NPM Docker Sync",
+          "visibility": "visible"
+        }
+      ]
+    },
     "commands": [
       {
         "command": "npmDockerSync.sharePort",
-        "title": "NPM Docker Sync: Share Port…"
+        "title": "Share Port…",
+        "icon": "$(add)",
+        "category": "NPM Docker Sync"
       },
       {
         "command": "npmDockerSync.copyUrl",
-        "title": "NPM Docker Sync: Copy Active Tunnel URL"
+        "title": "Copy Active Tunnel URL",
+        "category": "NPM Docker Sync"
       },
       {
         "command": "npmDockerSync.stopTunnel",
-        "title": "NPM Docker Sync: Stop Tunnel"
+        "title": "Stop Tunnel",
+        "category": "NPM Docker Sync"
       },
       {
         "command": "npmDockerSync.listTunnels",
-        "title": "NPM Docker Sync: List Tunnels"
+        "title": "List Tunnels",
+        "category": "NPM Docker Sync"
+      },
+      {
+        "command": "npmDockerSync.refreshTunnels",
+        "title": "Refresh",
+        "icon": "$(refresh)",
+        "category": "NPM Docker Sync"
+      },
+      {
+        "command": "npmDockerSync.copyTunnelUrl",
+        "title": "Copy URL",
+        "icon": "$(copy)",
+        "category": "NPM Docker Sync"
+      },
+      {
+        "command": "npmDockerSync.openTunnelUrl",
+        "title": "Open in Browser",
+        "icon": "$(link-external)",
+        "category": "NPM Docker Sync"
+      },
+      {
+        "command": "npmDockerSync.stopTunnelItem",
+        "title": "Stop",
+        "icon": "$(trash)",
+        "category": "NPM Docker Sync"
       }
     ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "npmDockerSync.sharePort",
+          "when": "view == npmDockerSync.tunnelsView",
+          "group": "navigation@1"
+        },
+        {
+          "command": "npmDockerSync.refreshTunnels",
+          "when": "view == npmDockerSync.tunnelsView",
+          "group": "navigation@2"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "npmDockerSync.openTunnelUrl",
+          "when": "view == npmDockerSync.tunnelsView && viewItem == tunnel",
+          "group": "inline@1"
+        },
+        {
+          "command": "npmDockerSync.copyTunnelUrl",
+          "when": "view == npmDockerSync.tunnelsView && viewItem == tunnel",
+          "group": "inline@2"
+        },
+        {
+          "command": "npmDockerSync.stopTunnelItem",
+          "when": "view == npmDockerSync.tunnelsView && viewItem == tunnel",
+          "group": "inline@3"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "npmDockerSync.copyTunnelUrl",
+          "when": "false"
+        },
+        {
+          "command": "npmDockerSync.openTunnelUrl",
+          "when": "false"
+        },
+        {
+          "command": "npmDockerSync.stopTunnelItem",
+          "when": "false"
+        }
+      ]
+    },
     "configuration": {
       "title": "NPM Docker Sync",
       "properties": {

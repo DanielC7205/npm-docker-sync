@@ -28,9 +28,20 @@ In VS Code: **Extensions: Install from Location…** → select this folder, or 
 - `npmDockerSync.token` — bearer token
 - `npmDockerSync.forwardHost` — optional IP override (otherwise auto-detected)
 
+## Panel view (like Ports)
+
+The extension adds an **NPM Tunnels** tab in the bottom panel (next to Terminal / Ports / Output).
+
+- **+** share a local port
+- **Refresh** reload tunnels from the API
+- Per row: open in browser, copy URL, stop
+
+If you don’t see it: **View → Appearance → Panel**, then look for the NPM Tunnels icon in the panel header (or Command Palette → “NPM Tunnels: Focus on Tunnels View”).
+
 ## Commands
 
-- **NPM Docker Sync: Share Port…** — picks from listening/common ports or a custom port; default name is the workspace folder; hostname becomes `{name}-{id}.{TUNNEL_BASE_DOMAIN}`
+- **NPM Docker Sync: Share Port…**
 - **Copy Active Tunnel URL**
 - **Stop Tunnel**
 - **List Tunnels**
+- **Refresh** (panel title bar)
