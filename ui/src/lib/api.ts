@@ -165,10 +165,18 @@ export const testUpstream = (
   index: number,
   body: { host?: string; port?: number; scheme?: string },
 ) =>
-  api<{ ok: boolean; message: string; latencyMs: number; host: string; port: number; scheme: string }>(
-    `/api/routes/${encodeURIComponent(containerId)}/${index}/test-upstream`,
-    { method: 'POST', body: JSON.stringify(body) },
-  )
+  api<{
+    ok: boolean
+    message: string
+    latencyMs: number
+    via?: string
+    host: string
+    port: number
+    scheme: string
+  }>(`/api/routes/${encodeURIComponent(containerId)}/${index}/test-upstream`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
 
 export const fetchTunnels = () => api<TunnelInfo[]>('/api/tunnels')
 export const createTunnel = (body: {

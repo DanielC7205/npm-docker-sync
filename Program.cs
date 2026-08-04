@@ -304,8 +304,8 @@ app.MapPost("/api/routes/{containerId}/{index:int}/test-upstream", async (
         var host = body?.Host ?? route?.ForwardHost ?? "";
         var port = body?.Port ?? route?.ForwardPort ?? 0;
         var scheme = body?.Scheme ?? route?.ForwardScheme ?? "http";
-        var (ok, message, latencyMs) = await orchestrator.TestUpstreamAsync(host, port, scheme, ct);
-        return Results.Ok(new { ok, message, latencyMs, host, port, scheme });
+        var (ok, message, latencyMs, via) = await orchestrator.TestUpstreamAsync(host, port, scheme, ct);
+        return Results.Ok(new { ok, message, latencyMs, via, host, port, scheme });
     }
     catch (Exception ex)
     {

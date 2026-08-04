@@ -14,6 +14,7 @@ public class DockerNetworkService
     private string? _detectedDockerHostIp;
     private HashSet<string>? _npmNetworks;
     private bool _npmIsHostNetwork;
+    private string? _npmContainerId;
 
     public DockerNetworkService(
         ILogger<DockerNetworkService> logger,
@@ -71,6 +72,7 @@ public class DockerNetworkService
                 return;
             }
 
+            _npmContainerId = npmContainer.ID;
             var containerDetails = await _dockerClient.Containers.InspectContainerAsync(npmContainer.ID, cancellationToken);
 
             if (containerDetails.NetworkSettings?.Networks != null)
@@ -398,6 +400,231 @@ public class DockerNetworkService
     }
 
     public string? DetectedDockerHostIp => _detectedDockerHostIp ?? _dockerHostIp;
+    public bool NpmIsHostNetwork => _npmIsHostNetwork;
+    public string? NpmContainerId => _npmContainerId;
+
+    /// <summary>
+    /// Probe upstream the same way NPMplus would: prefer <c>docker exec</c> into the NPM
+    /// container (host netns when NPMplus uses <c>network_mode: host</c>), else local TCP/HTTP.
+    /// </summary>
+    public async Task<(bool Ok, string Message, long LatencyMs, string Via)> ProbeUpstreamAsync(
+        string host,
+        int port,
+        string? scheme,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(host) || port is <= 0 or > 65535)
+            return (false, "Host and port are required", 0, "none");
+
+        host = host.Trim();
+        if (!IsSafeProbeHost(host))
+            return (false, "Host contains invalid characters", 0, "none");
+
+        var npmId = await ResolveNpmContainerIdAsync(cancellationToken);
+        if (!string.IsNullOrEmpty(npmId))
+        {
+            try
+            {
+                var result = await ProbeViaContainerExecAsync(npmId, host, port, scheme, cancellationToken);
+                if (result.HasValue)
+                    return result.Value;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Upstream probe via NPM container failed; falling back to local probe");
+            }
+        }
+
+        var local = await ProbeLocalAsync(host, port, scheme, cancellationToken);
+        var viaNote = string.IsNullOrEmpty(npmId)
+            ? "local (set NPM_CONTAINER_NAME to probe from NPMplus)"
+            : "local (NPM exec unavailable)";
+        return (local.Ok, local.Message, local.LatencyMs, viaNote);
+    }
+
+    private async Task<string?> ResolveNpmContainerIdAsync(CancellationToken cancellationToken)
+    {
+        if (!string.IsNullOrEmpty(_npmContainerId))
+            return _npmContainerId;
+
+        if (string.IsNullOrEmpty(_npmContainerName))
+            return null;
+
+        try
+        {
+            var containers = await _dockerClient.Containers.ListContainersAsync(
+                new ContainersListParameters { All = true },
+                cancellationToken);
+
+            var npmContainer = containers.FirstOrDefault(c =>
+                c.Names.Any(n => n.TrimStart('/') == _npmContainerName) ||
+                c.ID.StartsWith(_npmContainerName));
+
+            if (npmContainer != null)
+            {
+                _npmContainerId = npmContainer.ID;
+                var details = await _dockerClient.Containers.InspectContainerAsync(npmContainer.ID, cancellationToken);
+                _npmIsHostNetwork = IsHostNetworkMode(details);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Could not resolve NPM container for upstream probe");
+        }
+
+        return _npmContainerId;
+    }
+
+    private async Task<(bool Ok, string Message, long LatencyMs, string Via)?> ProbeViaContainerExecAsync(
+        string npmContainerId,
+        string host,
+        int port,
+        string? scheme,
+        CancellationToken cancellationToken)
+    {
+        var schemeNorm = string.IsNullOrWhiteSpace(scheme) ? "http" : scheme.Trim().ToLowerInvariant();
+        // Args after the script name become $1/$2/$3 — avoids shell injection.
+        const string script = """
+            host="$1"; port="$2"; scheme="$3"
+            tcp_ok=0
+            if command -v nc >/dev/null 2>&1; then
+              nc -z -w 3 "$host" "$port" >/dev/null 2>&1 && tcp_ok=1
+            elif command -v busybox >/dev/null 2>&1; then
+              busybox nc -z -w 3 "$host" "$port" >/dev/null 2>&1 && tcp_ok=1
+            elif command -v bash >/dev/null 2>&1; then
+              timeout 3 bash -c "echo >/dev/tcp/$host/$port" 2>/dev/null && tcp_ok=1
+            fi
+            if [ "$tcp_ok" != "1" ]; then
+              # Last resort: curl/wget connect failure implies TCP down
+              if command -v curl >/dev/null 2>&1; then
+                curl -sk -o /dev/null -m 3 "${scheme}://${host}:${port}/" >/dev/null 2>&1
+                rc=$?
+                # curl 7 = failed to connect; 28 = timeout
+                if [ "$rc" = "7" ] || [ "$rc" = "28" ]; then
+                  echo "TCP failed"
+                  exit 1
+                fi
+                tcp_ok=1
+              elif command -v wget >/dev/null 2>&1; then
+                wget -q -T 3 -O /dev/null "${scheme}://${host}:${port}/" >/dev/null 2>&1
+                rc=$?
+                if [ "$rc" -ne 0 ] && [ "$rc" -ne 8 ]; then
+                  echo "TCP failed"
+                  exit 1
+                fi
+                tcp_ok=1
+              else
+                echo "No nc/curl/wget in NPM container"
+                exit 2
+              fi
+            fi
+            if [ "$scheme" = "http" ] || [ "$scheme" = "https" ]; then
+              if command -v curl >/dev/null 2>&1; then
+                code=$(curl -sk -o /dev/null -w '%{http_code}' -m 3 "${scheme}://${host}:${port}/" 2>/dev/null || true)
+                echo "TCP ok · HTTP ${code:-?} (via npmplus)"
+                exit 0
+              fi
+              if command -v wget >/dev/null 2>&1; then
+                if wget -q -T 3 -O /dev/null "${scheme}://${host}:${port}/" 2>/dev/null; then
+                  echo "TCP ok · HTTP probe ok (via npmplus)"
+                else
+                  echo "TCP ok · HTTP probe failed (via npmplus)"
+                fi
+                exit 0
+              fi
+            fi
+            echo "TCP ok (via npmplus)"
+            exit 0
+            """;
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var create = await _dockerClient.Exec.ExecCreateContainerAsync(
+            npmContainerId,
+            new ContainerExecCreateParameters
+            {
+                AttachStdout = true,
+                AttachStderr = true,
+                Cmd = new List<string>
+                {
+                    "sh", "-c", script, "probe",
+                    host, port.ToString(), schemeNorm,
+                },
+            },
+            cancellationToken);
+
+        using var multiplexed = await _dockerClient.Exec.StartAndAttachContainerExecAsync(
+            create.ID, false, cancellationToken);
+        var (stdout, stderr) = await multiplexed.ReadOutputToEndAsync(cancellationToken);
+        sw.Stop();
+
+        var inspect = await _dockerClient.Exec.InspectContainerExecAsync(create.ID, cancellationToken);
+        var output = (stdout ?? string.Empty).Trim();
+        if (string.IsNullOrEmpty(output))
+            output = (stderr ?? string.Empty).Trim();
+
+        var via = _npmIsHostNetwork ? "npmplus (host network)" : "npmplus";
+
+        if (inspect.ExitCode == 2)
+            return null; // missing tools — caller falls back to local
+
+        if (inspect.ExitCode != 0)
+        {
+            var failMsg = string.IsNullOrEmpty(output) ? $"TCP connect to {host}:{port} failed" : output;
+            return (false, failMsg, sw.ElapsedMilliseconds, via);
+        }
+
+        var okMsg = string.IsNullOrEmpty(output) ? "TCP ok (via npmplus)" : output;
+        return (true, okMsg, sw.ElapsedMilliseconds, via);
+    }
+
+    private static async Task<(bool Ok, string Message, long LatencyMs)> ProbeLocalAsync(
+        string host,
+        int port,
+        string? scheme,
+        CancellationToken cancellationToken)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        try
+        {
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            cts.CancelAfter(TimeSpan.FromSeconds(3));
+            using var client = new System.Net.Sockets.TcpClient();
+            await client.ConnectAsync(host, port, cts.Token);
+            sw.Stop();
+
+            var schemeNorm = (scheme ?? "http").Trim().ToLowerInvariant();
+            if (schemeNorm is "http" or "https")
+            {
+                try
+                {
+                    using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(3) };
+                    var uri = $"{schemeNorm}://{host}:{port}/";
+                    using var resp = await http.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+                    return (true, $"TCP ok · HTTP {(int)resp.StatusCode} {resp.ReasonPhrase}", sw.ElapsedMilliseconds);
+                }
+                catch (Exception httpEx)
+                {
+                    return (true, $"TCP ok · HTTP probe failed: {httpEx.Message}", sw.ElapsedMilliseconds);
+                }
+            }
+
+            return (true, "TCP connection succeeded", sw.ElapsedMilliseconds);
+        }
+        catch (Exception ex)
+        {
+            sw.Stop();
+            return (false, ex.Message, sw.ElapsedMilliseconds);
+        }
+    }
+
+    private static bool IsSafeProbeHost(string host)
+    {
+        // Hostnames, IPv4, IPv6 (with or without brackets)
+        if (host.StartsWith('[') && host.EndsWith(']'))
+            host = host[1..^1];
+
+        return Uri.CheckHostName(host) != UriHostNameType.Unknown;
+    }
 
     /// <summary>
     /// Candidate container-internal ports — does not require host port publishing (-p).

@@ -182,10 +182,11 @@ export function RouteEditDialog({
         port: port ? Number(port) : undefined,
         scheme,
       })
+      const via = result.via ? ` · via ${result.via}` : ''
       setTestMsg(
         result.ok
-          ? `OK · ${result.message} (${result.latencyMs}ms)`
-          : `Failed · ${result.message}`,
+          ? `OK · ${result.message} (${result.latencyMs}ms)${via}`
+          : `Failed · ${result.message}${via}`,
       )
     } catch (e) {
       setTestMsg(e instanceof Error ? e.message : 'Test failed')
@@ -324,7 +325,8 @@ export function RouteEditDialog({
               )}
             </div>
             <p className="text-[11px] text-muted-foreground">
-              Probe runs from npm-docker-sync (best signal when it shares networks with NPMplus).
+              Probe runs inside the NPMplus container when <code className="text-[10px]">NPM_CONTAINER_NAME</code> is
+              set — same network path nginx uses (including host networking / bridge IPs).
             </p>
           </Section>
 

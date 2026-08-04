@@ -1160,47 +1160,13 @@ public class SyncOrchestrator
         return false;
     }
 
-    public async Task<(bool Ok, string Message, long LatencyMs)> TestUpstreamAsync(
+    public async Task<(bool Ok, string Message, long LatencyMs, string Via)> TestUpstreamAsync(
         string host,
         int port,
         string? scheme,
         CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(host) || port <= 0 || port > 65535)
-            return (false, "Host and port are required", 0);
-
-        var sw = System.Diagnostics.Stopwatch.StartNew();
-        try
-        {
-            using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            cts.CancelAfter(TimeSpan.FromSeconds(3));
-            using var client = new System.Net.Sockets.TcpClient();
-            await client.ConnectAsync(host.Trim(), port, cts.Token);
-            sw.Stop();
-
-            var schemeNorm = (scheme ?? "http").Trim().ToLowerInvariant();
-            if (schemeNorm is "http" or "https")
-            {
-                try
-                {
-                    using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(3) };
-                    var uri = $"{schemeNorm}://{host.Trim()}:{port}/";
-                    using var resp = await http.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-                    return (true, $"TCP ok · HTTP {(int)resp.StatusCode} {resp.ReasonPhrase}", sw.ElapsedMilliseconds);
-                }
-                catch (Exception httpEx)
-                {
-                    return (true, $"TCP ok · HTTP probe failed: {httpEx.Message}", sw.ElapsedMilliseconds);
-                }
-            }
-
-            return (true, "TCP connection succeeded", sw.ElapsedMilliseconds);
-        }
-        catch (Exception ex)
-        {
-            sw.Stop();
-            return (false, ex.Message, sw.ElapsedMilliseconds);
-        }
+        return await _networkService.ProbeUpstreamAsync(host, port, scheme, cancellationToken);
     }
 
     private void RecordCreatedProxy(string proxyKey, int hostId, ProxyConfiguration config, bool uiDisabled)
