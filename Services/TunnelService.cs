@@ -184,11 +184,21 @@ public class TunnelService
         var tunnel = _settings.GetTunnel(id)
             ?? throw new InvalidOperationException("Tunnel not found");
 
+        var now = DateTime.UtcNow;
         var addMinutes = ttlMinutes ?? _settings.GetInt("TUNNEL_DEFAULT_TTL_MINUTES", 120);
         addMinutes = Math.Clamp(addMinutes, 5, 60 * 24 * 7);
 
-        var baseline = tunnel.ExpiresAt > DateTime.UtcNow ? tunnel.ExpiresAt : DateTime.UtcNow;
-        var maxExpiry = DateTime.UtcNow.AddDays(7);
+        // If we're extending right around expiry, clock skew / API latency can make
+        // `ExpiresAt` appear slightly in the past. In that case we still want to
+        // "add to remaining time" rather than hard-reset to `now + ttl`.
+        var remaining = tunnel.ExpiresAt - now;
+        var grace = TimeSpan.FromMinutes(2);
+
+        // If remaining is still >= -grace, add onto the stored expiry even if it is a bit past.
+        // Otherwise, it's truly expired and we reset from now.
+        var baseline = remaining >= -grace ? tunnel.ExpiresAt : now;
+
+        var maxExpiry = now.AddDays(7);
         tunnel.ExpiresAt = baseline.AddMinutes(addMinutes);
         if (tunnel.ExpiresAt > maxExpiry)
             tunnel.ExpiresAt = maxExpiry;

@@ -410,6 +410,230 @@ function portPickDetail(c: PortCandidate): string {
   return `Not listening yet · common ${c.hint ?? 'dev'} port`;
 }
 
+function uniqueNumbers(nums: number[]) {
+  return [...new Set(nums)].sort((a, b) => a - b);
+}
+
+async function openTunnelCreateModal(opts: {
+  candidates: PortCandidate[];
+  project: string;
+  forwardHost: string;
+  defaultScheme: string;
+  defaultTtlMinutes: number;
+  defaultDisableOnExpire: boolean;
+}): Promise<TunnelResponse | null> {
+  const ports = uniqueNumbers(opts.candidates.map((c) => c.port)).slice(0, 60);
+  const suggestedPort = ports.find((p) => p > 0) ?? 3000;
+  const portDetailsByPort: Record<number, string> = {};
+  for (const c of opts.candidates) {
+    if (portDetailsByPort[c.port] == null) portDetailsByPort[c.port] = portPickDetail(c);
+  }
+  const nonce = Math.random().toString(36).slice(2);
+
+  const panel = vscode.window.createWebviewPanel(
+    'npmDockerSyncCreateTunnel',
+    'Create NPM Tunnel',
+    vscode.ViewColumn.Active,
+    { enableScripts: true, retainContextWhenHidden: false },
+  );
+
+  const cspSource = panel.webview.cspSource;
+
+  const html = `<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${cspSource} https: data:; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
+    <style>
+      body { font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif; padding: 16px; }
+      .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+      .full { grid-column: 1 / -1; }
+      label { font-size: 12px; color: #666; display: block; margin-bottom: 6px; }
+      input[type="text"], input[type="number"], select { width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid #ddd; background: #fff; }
+      .row { display:flex; gap: 12px; align-items:center; justify-content:space-between; }
+      .actions { display:flex; gap: 10px; justify-content:flex-end; margin-top: 16px; }
+      button { padding: 8px 12px; border-radius: 8px; border: 1px solid #ddd; background: #f6f6f6; cursor: pointer; }
+      button.primary { background: #2f6fed; border-color: #2f6fed; color: #fff; }
+      .note { font-size: 12px; color: #666; margin-top: 8px; line-height: 1.35; }
+      .error { margin-top: 12px; color: #b00020; font-size: 13px; white-space: pre-wrap; }
+    </style>
+  </head>
+  <body>
+    <h2 style="margin-top:0">Tunnel creation</h2>
+    <div class="note">
+      TLS for tunnels is handled by the server settings (wildcard cert / domain map). This form controls the tunnel target + expiry/persistence.
+    </div>
+    <div class="grid" style="margin-top: 14px">
+      <div>
+        <label>Local port</label>
+        <input id="port" type="number" list="ports" min="1" max="65535" value="${suggestedPort}" />
+        <datalist id="ports">
+          ${ports.map((p) => `<option value="${p}"></option>`).join('')}
+        </datalist>
+        <div class="note" id="portDetail"></div>
+      </div>
+      <div>
+        <label>Upstream scheme</label>
+        <select id="scheme">
+          <option value="http" ${opts.defaultScheme === 'http' ? 'selected' : ''}>http</option>
+          <option value="https" ${opts.defaultScheme === 'https' ? 'selected' : ''}>https</option>
+        </select>
+      </div>
+
+      <div>
+        <label>TTL minutes</label>
+        <input id="ttlMinutes" type="number" min="5" max="10080" value="${opts.defaultTtlMinutes}" />
+      </div>
+      <div>
+        <label>Persist after expiry</label>
+        <div class="row" style="padding: 8px 10px; border-radius: 8px; border: 1px solid #ddd;">
+          <span style="font-size: 13px; color:#333">${opts.defaultDisableOnExpire ? 'Keep (disable on expiry)' : 'Auto delete on expiry'}</span>
+          <input id="disableOnExpire" type="checkbox" ${opts.defaultDisableOnExpire ? 'checked' : ''} />
+        </div>
+        <div class="note">Keep mode disables the NPMplus proxy host on expiry (does not delete).</div>
+      </div>
+
+      <div class="full">
+        <label>Tunnel name (used in hostname)</label>
+        <input id="label" type="text" value="${escapeHtml(opts.project)}" />
+      </div>
+      <div class="full">
+        <label>Forward host (NPMplus dials this)</label>
+        <input id="host" type="text" value="${escapeHtml(opts.forwardHost)}" />
+        <div class="note">Leave as-is unless NPMplus can’t reach your machine.</div>
+      </div>
+    </div>
+
+    <div id="error" class="error" style="display:none"></div>
+
+    <div class="actions">
+      <button id="cancel">Cancel</button>
+      <button class="primary" id="create">Create & Copy URL</button>
+    </div>
+
+    <script nonce="${nonce}">
+      const vscode = acquireVsCodeApi();
+      const $ = (id) => document.getElementById(id);
+      const portDetailsByPort = ${JSON.stringify(portDetailsByPort)};
+
+      function setError(msg) {
+        const el = $('error');
+        if (!msg) { el.style.display = 'none'; el.textContent = ''; return; }
+        el.style.display = 'block';
+        el.textContent = msg;
+      }
+
+      function updatePortDetail() {
+        const port = Number($('port').value);
+        const detail = portDetailsByPort[port] ?? '';
+        const el = $('portDetail');
+        if (!el) return;
+        el.textContent = detail;
+      }
+
+      window.addEventListener('message', (event) => {
+        const msg = event.data;
+        if (msg && msg.type === 'error') setError(msg.message);
+      });
+
+      $('cancel').addEventListener('click', () => {
+        vscode.postMessage({ type: 'cancel' });
+      });
+
+      $('port').addEventListener('input', updatePortDetail);
+      updatePortDetail();
+
+      $('create').addEventListener('click', async () => {
+        setError('');
+        const port = Number($('port').value);
+        const ttlMinutes = Number($('ttlMinutes').value);
+        const scheme = $('scheme').value;
+        const disableOnExpire = $('disableOnExpire').checked;
+        const label = $('label').value || '';
+        const host = $('host').value || '';
+
+        if (!Number.isFinite(port) || port < 1 || port > 65535) return setError('Enter a valid port (1-65535).');
+        if (!Number.isFinite(ttlMinutes) || ttlMinutes < 5 || ttlMinutes > 10080) return setError('Enter TTL minutes (5-10080).');
+        if (!host) return setError('Forward host is required (the machine NPMplus dials).');
+
+        vscode.postMessage({
+          type: 'create',
+          payload: { port, ttlMinutes, scheme, disableOnExpire, label: label.trim() || null, host: host.trim() },
+        });
+      });
+    </script>
+  </body>
+</html>`;
+
+  panel.webview.html = html;
+
+  return await new Promise<TunnelResponse | null>((resolve) => {
+    let settled = false;
+    const disposeAndResolve = (val: TunnelResponse | null) => {
+      if (settled) return;
+      settled = true;
+      try { panel.dispose(); } catch { /* ignore */ }
+      resolve(val);
+    };
+
+    panel.onDidDispose(() => {
+      disposeAndResolve(null);
+    });
+
+    panel.webview.onDidReceiveMessage(async (message) => {
+      if (!message || typeof message !== 'object') return;
+
+      if (message.type === 'cancel') {
+        disposeAndResolve(null);
+        return;
+      }
+
+      if (message.type !== 'create') return;
+
+      const payload = message.payload as {
+        port: number;
+        ttlMinutes: number;
+        scheme: string;
+        disableOnExpire: boolean;
+        label: string | null;
+        host: string;
+      };
+
+      try {
+        const created = await api<TunnelResponse>('/api/tunnels', {
+          method: 'POST',
+          body: JSON.stringify({
+            port: payload.port,
+            scheme: payload.scheme,
+            ttlMinutes: payload.ttlMinutes,
+            label: payload.label ?? undefined,
+            host: payload.host,
+            disableOnExpire: payload.disableOnExpire,
+          }),
+        });
+        disposeAndResolve(created);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        panel.webview.postMessage({ type: 'error', message: msg });
+      }
+    });
+  });
+}
+
+function escapeHtml(s: string) {
+  return s.replace(/[&<>"']/g, (ch) => {
+    switch (ch) {
+      case '&': return '&amp;';
+      case '<': return '&lt;';
+      case '>': return '&gt;';
+      case '"': return '&quot;';
+      case '\'': return '&#39;';
+      default: return ch;
+    }
+  });
+}
+
 async function sharePort() {
   const candidates = await detectListeningPorts();
   const project = workspaceLabel();
@@ -421,6 +645,43 @@ async function sharePort() {
     );
     return;
   }
+
+  const modalCfg = vscode.workspace.getConfiguration('npmDockerSync');
+  const modalDefaultScheme = (modalCfg.get<string>('tunnelScheme') || 'http').trim();
+  const modalDefaultTtl = Number(modalCfg.get<number>('tunnelTtlMinutes') ?? 120);
+  const modalDefaultDisableOnExpire = !!modalCfg.get<boolean>('tunnelDisableOnExpire');
+
+  const tunnel = await openTunnelCreateModal({
+    candidates,
+    project,
+    forwardHost: host,
+    defaultScheme: modalDefaultScheme,
+    defaultTtlMinutes: Number.isFinite(modalDefaultTtl) ? modalDefaultTtl : 120,
+    defaultDisableOnExpire: modalDefaultDisableOnExpire,
+  });
+
+  if (!tunnel) return;
+
+  activeTunnel = tunnel;
+  try {
+    await vscode.env.clipboard.writeText(tunnel.url);
+  } catch {
+    // Clipboard failures should not block tunnel creation.
+  }
+  updateStatus(tunnel);
+  tunnelsProvider?.refresh();
+
+  const pick = await vscode.window.showInformationMessage(
+    `Tunnel ready: ${tunnel.url} (copied)`,
+    'Open',
+    'Stop',
+  );
+  if (pick === 'Open') {
+    await vscode.env.openExternal(vscode.Uri.parse(tunnel.url));
+  } else if (pick === 'Stop') {
+    await stopTunnel();
+  }
+  return;
 
   const related = candidates.filter((c) => c.listening && c.workspace);
   const otherListening = candidates.filter((c) => c.listening && !c.workspace);
@@ -463,7 +724,7 @@ async function sharePort() {
   if (!chosen) return;
 
   let portStr: string | undefined;
-  if (chosen.portValue === '__custom__') {
+  if (chosen!.portValue === '__custom__') {
     portStr = await vscode.window.showInputBox({
       prompt: 'Local port to share',
       value: related[0]?.port?.toString() ?? otherListening[0]?.port?.toString() ?? '3000',
@@ -471,7 +732,7 @@ async function sharePort() {
         /^\d+$/.test(v) && Number(v) > 0 && Number(v) < 65536 ? undefined : 'Enter a valid port',
     });
   } else {
-    portStr = chosen.portValue;
+    portStr = chosen!.portValue;
   }
   if (!portStr) return;
 
@@ -506,7 +767,7 @@ async function sharePort() {
   if (!ttlPick) return;
 
   let ttlMinutes = defaultTtl;
-  if (ttlPick.isCustom) {
+  if (ttlPick!.isCustom) {
     const raw = await vscode.window.showInputBox({
       prompt: 'TTL minutes',
       value: String(defaultTtl),
@@ -519,7 +780,7 @@ async function sharePort() {
     if (!raw) return;
     ttlMinutes = Number(raw);
   } else {
-    ttlMinutes = ttlPick.minutes;
+    ttlMinutes = ttlPick!.minutes;
   }
 
   const persistPick = await vscode.window.showQuickPick(
@@ -530,7 +791,7 @@ async function sharePort() {
     { placeHolder: 'On expiry: disable (persist) or delete?' },
   );
   if (!persistPick) return;
-  const disableOnExpire = persistPick.disable;
+  const disableOnExpire = persistPick!.disable;
 
   const rememberPick = await vscode.window.showQuickPick(['Use once', 'Remember for next time'], {
     placeHolder: 'Remember these tunnel defaults?',
@@ -538,7 +799,7 @@ async function sharePort() {
   if (!rememberPick) return;
 
   if (rememberPick === 'Remember for next time') {
-    await cfg.update('tunnelScheme', schemeChoice.value, vscode.ConfigurationTarget.Global);
+    await cfg.update('tunnelScheme', schemeChoice!.value, vscode.ConfigurationTarget.Global);
     await cfg.update('tunnelTtlMinutes', ttlMinutes, vscode.ConfigurationTarget.Global);
     await cfg.update('tunnelDisableOnExpire', disableOnExpire, vscode.ConfigurationTarget.Global);
   }
@@ -555,7 +816,7 @@ async function sharePort() {
       method: 'POST',
       body: JSON.stringify({
         port: Number(portStr),
-        scheme: schemeChoice.value,
+        scheme: schemeChoice!.value,
         ttlMinutes,
         label: (label || project).trim() || undefined,
         host,
@@ -579,7 +840,7 @@ async function sharePort() {
     } else if (pick === 'Stop') {
       await stopTunnel();
     }
-  } catch (e) {
+  } catch (e: any) {
     const msg = e instanceof Error ? e.message : String(e);
     vscode.window.showErrorMessage(
       `Tunnel failed: ${msg}` +
