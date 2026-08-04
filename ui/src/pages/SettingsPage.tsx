@@ -525,7 +525,8 @@ export function SettingsPage({ auth }: { auth: AuthStatus | null }) {
 
       <div className="grid gap-6 lg:grid-cols-[200px_1fr]">
         <aside className="hidden lg:block">
-          <nav className="sticky top-4 space-y-0.5">
+          {/* If the user scrolls past the top of the page, the nav should be sticky */}
+          <nav className="sticky top-20 space-y-0.5">
             <p className="mb-2 px-2 text-xs font-medium tracking-wide text-muted-foreground uppercase">
               Sections
             </p>
