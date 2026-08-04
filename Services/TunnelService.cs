@@ -8,17 +8,20 @@ public class TunnelService
     private readonly SettingsStore _settings;
     private readonly NginxProxyManagerClient _npm;
     private readonly CertificateService _certificates;
+    private readonly UnavailableFallbackService _fallback;
     private readonly ILogger<TunnelService> _logger;
 
     public TunnelService(
         SettingsStore settings,
         NginxProxyManagerClient npm,
         CertificateService certificates,
+        UnavailableFallbackService fallback,
         ILogger<TunnelService> logger)
     {
         _settings = settings;
         _npm = npm;
         _certificates = certificates;
+        _fallback = fallback;
         _logger = logger;
     }
 
@@ -33,6 +36,7 @@ public class TunnelService
         string? label,
         bool disableOnExpire,
         string? createdBy,
+        List<CustomLocation>? locations,
         CancellationToken cancellationToken)
     {
         var baseDomain = _settings.Get("TUNNEL_BASE_DOMAIN")?.Trim().TrimStart('.');
@@ -91,6 +95,7 @@ public class TunnelService
             Enabled = true,
             NpmplusAuthRequest = string.IsNullOrWhiteSpace(authRequest) ? "none" : authRequest,
             NpmplusAuthRequestUpstream = authUpstream,
+            Locations = LabelParser.ToProxyLocationRequests(locations),
             Meta = new Dictionary<string, object>
             {
                 ["managed_by"] = "npm-docker-sync",
@@ -112,6 +117,8 @@ public class TunnelService
             NpmHostId = hostCreated.Id,
             ExpiresAt = DateTime.UtcNow.AddMinutes(ttl),
             DisableOnExpire = disableOnExpire,
+            Locations = locations,
+            IsUnavailable = false,
             CreatedBy = createdBy,
             Label = label,
             CreatedAt = DateTime.UtcNow,
@@ -120,6 +127,83 @@ public class TunnelService
         _settings.InsertTunnel(tunnel);
         _logger.LogInformation("Created tunnel {Domain} -> {Host}:{Port} cert={CertId} expires {Expires}",
             domain, forwardHost, port, certId.Value, tunnel.ExpiresAt);
+        return tunnel;
+    }
+
+    public async Task<TunnelRecord> UpdateAsync(
+        string id,
+        int? port,
+        string? scheme,
+        string? host,
+        string? label,
+        bool? disableOnExpire,
+        List<CustomLocation>? locations,
+        CancellationToken cancellationToken)
+    {
+        var tunnel = _settings.GetTunnel(id)
+            ?? throw new InvalidOperationException("Tunnel not found");
+
+        if (port.HasValue) tunnel.ForwardPort = port.Value;
+        if (!string.IsNullOrWhiteSpace(scheme)) tunnel.ForwardScheme = scheme.Trim().ToLowerInvariant();
+        if (!string.IsNullOrWhiteSpace(host)) tunnel.ForwardHost = host.Trim();
+        if (label != null) tunnel.Label = string.IsNullOrWhiteSpace(label) ? null : label.Trim();
+        if (disableOnExpire.HasValue) tunnel.DisableOnExpire = disableOnExpire.Value;
+        if (locations != null) tunnel.Locations = locations;
+
+        if (!tunnel.NpmHostId.HasValue)
+        {
+            _settings.UpdateTunnel(tunnel);
+            return tunnel;
+        }
+
+        var existing = await _npm.GetProxyHostByIdAsync(tunnel.NpmHostId.Value, cancellationToken)
+            ?? throw new InvalidOperationException("NPM proxy host missing for tunnel");
+
+        var accessListIds = existing.NpmplusAccessListIds ?? new List<int>();
+        var request = new ProxyHostRequest
+        {
+            DomainNames = existing.DomainNames ?? new List<string> { tunnel.Domain },
+            ForwardScheme = tunnel.ForwardScheme,
+            ForwardHost = tunnel.ForwardHost,
+            ForwardPort = tunnel.ForwardPort,
+            AccessListId = existing.AccessListId ?? 0,
+            NpmplusAccessListIds = accessListIds,
+            NpmplusAccessListType = existing.NpmplusAccessListType ?? "public",
+            CertificateId = existing.CertificateId ?? 0,
+            SslForced = true,
+            Http2Support = true,
+            HstsEnabled = true,
+            AllowWebsocketUpgrade = true,
+            BlockExploits = true,
+            Enabled = true,
+            AdvancedConfig = string.Empty,
+            NpmplusAuthRequest = existing.NpmplusAuthRequest ?? "none",
+            NpmplusAuthRequestUpstream = existing.NpmplusAuthRequestUpstream ?? string.Empty,
+            Locations = locations != null
+                ? LabelParser.ToProxyLocationRequests(locations)
+                : (existing.Locations ?? new List<ProxyLocationRequest>()),
+            Meta = existing.Meta ?? new Dictionary<string, object>
+            {
+                ["managed_by"] = "npm-docker-sync",
+                ["tunnel"] = true,
+            },
+        };
+
+        // Clear unavailable markers on edit
+        if (request.Meta.ContainsKey("unavailable"))
+        {
+            request.Meta.Remove("unavailable");
+            request.Meta.Remove("unavailable_kind");
+            request.Meta.Remove("unavailable_reason");
+            request.Meta.Remove("fallback_original_host");
+            request.Meta.Remove("fallback_original_port");
+            request.Meta.Remove("fallback_original_scheme");
+            request.Meta.Remove("fallback_original_advanced");
+        }
+
+        await _npm.UpdateProxyHostAsync(tunnel.NpmHostId.Value, request, cancellationToken);
+        tunnel.IsUnavailable = false;
+        _settings.UpdateTunnel(tunnel);
         return tunnel;
     }
 
@@ -135,7 +219,6 @@ public class TunnelService
             return configured;
         }
 
-        // Prefer map / match for the full hostname, then wildcard of the tunnel base, then base itself
         var candidates = new List<string> { domain, $"*.{baseDomain}", baseDomain };
         var parent = ParentDomain(baseDomain);
         if (!string.IsNullOrEmpty(parent))
@@ -188,14 +271,8 @@ public class TunnelService
         var addMinutes = ttlMinutes ?? _settings.GetInt("TUNNEL_DEFAULT_TTL_MINUTES", 120);
         addMinutes = Math.Clamp(addMinutes, 5, 60 * 24 * 7);
 
-        // If we're extending right around expiry, clock skew / API latency can make
-        // `ExpiresAt` appear slightly in the past. In that case we still want to
-        // "add to remaining time" rather than hard-reset to `now + ttl`.
         var remaining = tunnel.ExpiresAt - now;
         var grace = TimeSpan.FromMinutes(2);
-
-        // If remaining is still >= -grace, add onto the stored expiry even if it is a bit past.
-        // Otherwise, it's truly expired and we reset from now.
         var baseline = remaining >= -grace ? tunnel.ExpiresAt : now;
 
         var maxExpiry = now.AddDays(7);
@@ -203,23 +280,42 @@ public class TunnelService
         if (tunnel.ExpiresAt > maxExpiry)
             tunnel.ExpiresAt = maxExpiry;
 
-        _settings.UpdateTunnel(tunnel);
-
-        // If the tunnel was persisted, expiry would have disabled it in NPMplus.
-        // Re-enable when extending so it becomes usable again immediately.
         if (tunnel.NpmHostId.HasValue)
         {
             try
             {
-                await _npm.SetProxyHostEnabledAsync(tunnel.NpmHostId.Value, true, cancellationToken);
+                if (tunnel.IsUnavailable || _fallback.IsEnabled())
+                {
+                    var existing = await _npm.GetProxyHostByIdAsync(tunnel.NpmHostId.Value, cancellationToken);
+                    if (existing != null && UnavailableFallbackService.IsMarkedUnavailable(existing))
+                    {
+                        await _fallback.RestoreHostAsync(
+                            tunnel.NpmHostId.Value,
+                            tunnel.ForwardHost,
+                            tunnel.ForwardPort,
+                            tunnel.ForwardScheme,
+                            LabelParser.ToProxyLocationRequests(tunnel.Locations),
+                            cancellationToken);
+                    }
+                    else
+                    {
+                        await _npm.SetProxyHostEnabledAsync(tunnel.NpmHostId.Value, true, cancellationToken);
+                    }
+                }
+                else
+                {
+                    await _npm.SetProxyHostEnabledAsync(tunnel.NpmHostId.Value, true, cancellationToken);
+                }
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Failed to re-enable NPM host {HostId} for tunnel {Id}",
+                _logger.LogWarning(ex, "Failed to restore NPM host {HostId} for tunnel {Id}",
                     tunnel.NpmHostId, id);
             }
         }
 
+        tunnel.IsUnavailable = false;
+        _settings.UpdateTunnel(tunnel);
         return tunnel;
     }
 
@@ -231,13 +327,30 @@ public class TunnelService
             if (tunnel.ExpiresAt > now)
                 continue;
 
+            if (tunnel.IsUnavailable)
+                continue;
+
             _logger.LogInformation("Expiring tunnel {Domain}", tunnel.Domain);
             try
             {
                 if (tunnel.DisableOnExpire && tunnel.NpmHostId.HasValue)
                 {
-                    // Persist mode: keep the tunnel record, but disable the proxy host in NPMplus.
-                    await _npm.SetProxyHostEnabledAsync(tunnel.NpmHostId.Value, false, cancellationToken);
+                    if (_fallback.IsEnabled())
+                    {
+                        await _fallback.RetargetHostAsync(
+                            tunnel.NpmHostId.Value,
+                            "tunnel",
+                            tunnel.Label ?? tunnel.Domain,
+                            "expired",
+                            cancellationToken);
+                    }
+                    else
+                    {
+                        await _npm.SetProxyHostEnabledAsync(tunnel.NpmHostId.Value, false, cancellationToken);
+                    }
+
+                    tunnel.IsUnavailable = true;
+                    _settings.UpdateTunnel(tunnel);
                     continue;
                 }
 

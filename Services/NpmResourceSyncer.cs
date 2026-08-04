@@ -446,6 +446,7 @@ public class NpmResourceSyncer
             allow_websocket_upgrade = host.AllowWebsocketUpgrade,
             access_list_id = MapAccessListId(host.AccessListId),
             advanced_config = host.AdvancedConfig ?? "",
+            locations = host.Locations ?? new List<ProxyLocationRequest>(),
             meta = new Dictionary<string, object>
             {
                 ["mirrored_from"] = _primary.GetType().Name,

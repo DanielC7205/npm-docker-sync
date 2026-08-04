@@ -651,7 +651,25 @@ public class LabelParser
             NpmplusAuthRequest = string.IsNullOrWhiteSpace(config.AuthRequest) ? "none" : config.AuthRequest,
             NpmplusAuthRequestUpstream = config.AuthRequestUpstream ?? string.Empty,
             Meta = meta,
+            Locations = ToProxyLocationRequests(config.Locations),
         };
+    }
+
+    public static List<ProxyLocationRequest> ToProxyLocationRequests(List<CustomLocation>? locations)
+    {
+        if (locations == null || locations.Count == 0)
+            return new List<ProxyLocationRequest>();
+
+        return locations.Select(loc => new ProxyLocationRequest
+        {
+            Path = string.IsNullOrWhiteSpace(loc.Path) ? "/" : loc.Path.Trim(),
+            ForwardScheme = string.IsNullOrWhiteSpace(loc.ForwardScheme) ? "http" : loc.ForwardScheme.Trim().ToLowerInvariant(),
+            ForwardHost = loc.ForwardHost?.Trim() ?? string.Empty,
+            ForwardPort = loc.ForwardPort ?? 0,
+            ForwardPath = string.IsNullOrWhiteSpace(loc.ForwardPath) ? null : loc.ForwardPath.Trim(),
+            NpmplusAccessListIds = new List<int>(),
+            NpmplusAccessListType = "public",
+        }).ToList();
     }
 
     public StreamRequest ToStreamRequest(StreamConfiguration config, string containerId, string syncInstanceId, string npmUrl)
@@ -716,6 +734,8 @@ public class ProxyConfiguration
     public bool WebsocketsExplicitlySet { get; set; }
     public string? AuthRequest { get; set; }
     public string? AuthRequestUpstream { get; set; }
+    /// <summary>Null = do not send / preserve on update; empty = clear; list = set.</summary>
+    public List<CustomLocation>? Locations { get; set; }
 }
 
 public class StreamConfiguration

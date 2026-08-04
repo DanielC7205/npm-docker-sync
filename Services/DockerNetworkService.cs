@@ -218,8 +218,78 @@ public class DockerNetworkService
             // ignore name lookup
         }
 
-        return preferred;
+            return preferred;
     }
+
+    /// <summary>
+    /// Hostnames NPMplus might use to reach this container (DNS name, aliases, IPs, host gateway).
+    /// </summary>
+    public async Task<List<HostCandidate>> ListCandidateHostsAsync(string containerId, CancellationToken cancellationToken)
+    {
+        var results = new List<HostCandidate>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        void Add(string host, string label, string source)
+        {
+            host = host.Trim();
+            if (string.IsNullOrEmpty(host) || !seen.Add(host)) return;
+            results.Add(new HostCandidate { Host = host, Label = label, Source = source });
+        }
+
+        try
+        {
+            var container = await _dockerClient.Containers.InspectContainerAsync(containerId, cancellationToken);
+            var containerName = container.Name.TrimStart('/');
+            var networks = container.NetworkSettings?.Networks;
+
+            var sharesNpm = false;
+            if (_npmNetworks != null && networks != null)
+                sharesNpm = networks.Keys.Any(n => _npmNetworks.Contains(n));
+
+            Add(containerName,
+                sharesNpm ? "Container DNS (shared network with NPM)" : "Container DNS name",
+                sharesNpm ? "shared-network" : "container-name");
+
+            if (networks != null)
+            {
+                foreach (var (netName, endpoint) in networks)
+                {
+                    if (endpoint.Aliases != null)
+                    {
+                        foreach (var alias in endpoint.Aliases)
+                        {
+                            if (string.Equals(alias, containerName, StringComparison.OrdinalIgnoreCase))
+                                continue;
+                            Add(alias, $"Network alias on {netName}", "alias");
+                        }
+                    }
+
+                    var ip = endpoint.IPAddress;
+                    if (!string.IsNullOrWhiteSpace(ip) && ip != "0.0.0.0")
+                    {
+                        var onNpm = _npmNetworks != null && _npmNetworks.Contains(netName);
+                        Add(ip,
+                            onNpm ? $"Container IP on {netName} (NPM network)" : $"Container IP on {netName}",
+                            onNpm ? "shared-ip" : "ip");
+                    }
+                }
+            }
+
+            var dockerHost = _detectedDockerHostIp ?? _dockerHostIp;
+            if (!string.IsNullOrWhiteSpace(dockerHost))
+                Add(dockerHost, "Docker host IP / gateway", "docker-host");
+
+            Add("host.docker.internal", "Docker Desktop host gateway", "host-gateway");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to list candidate hosts for {ContainerId}", containerId);
+        }
+
+        return results;
+    }
+
+    public string? DetectedDockerHostIp => _detectedDockerHostIp ?? _dockerHostIp;
 
     /// <summary>
     /// Candidate container-internal ports — does not require host port publishing (-p).

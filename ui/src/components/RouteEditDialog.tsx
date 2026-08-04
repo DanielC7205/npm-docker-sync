@@ -5,6 +5,8 @@ import {
   Globe,
   ImageIcon,
   Link2,
+  Loader2,
+  MapPin,
   Pencil,
   RotateCcw,
   Save,
@@ -19,11 +21,16 @@ import { Switch } from '@/components/ui/switch'
 import {
   clearRouteOverride,
   fetchCertificates,
+  fetchRoutes,
   patchRoute,
+  testUpstream,
   type CertificateInfo,
+  type CustomLocation,
+  type HostCandidate,
   type RouteInfo,
 } from '@/lib/api'
 import { cn } from '@/lib/utils'
+import { CustomLocationsEditor } from '@/components/CustomLocationsEditor'
 
 const AUTH_OPTIONS = ['none', 'authentik', 'authentik-send-basic-auth', 'oauth2proxy', 'authelia', 'tinyauth', 'anubis']
 const SELFHST_CDN = 'https://cdn.jsdelivr.net/gh/selfhst/icons/png'
@@ -88,6 +95,10 @@ export function RouteEditDialog({
   const [authRequest, setAuthRequest] = useState('none')
   const [authExempt, setAuthExempt] = useState(false)
   const [icon, setIcon] = useState('')
+  const [locations, setLocations] = useState<CustomLocation[]>([])
+  const [allRoutes, setAllRoutes] = useState<RouteInfo[]>([])
+  const [testMsg, setTestMsg] = useState<string | null>(null)
+  const [testing, setTesting] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -96,6 +107,9 @@ export function RouteEditDialog({
     void fetchCertificates()
       .then(setCerts)
       .catch(() => setCerts([]))
+    void fetchRoutes()
+      .then(setAllRoutes)
+      .catch(() => setAllRoutes([]))
   }, [open])
 
   useEffect(() => {
@@ -114,6 +128,8 @@ export function RouteEditDialog({
     setAuthRequest(route.authRequest || 'none')
     setAuthExempt(!!route.authExempt)
     setIcon(iconDisplayValue(route.icon))
+    setLocations(route.locations ?? [])
+    setTestMsg(null)
     setError(null)
   }, [route])
 
@@ -146,6 +162,7 @@ export function RouteEditDialog({
         authRequest: authExempt ? 'none' : authRequest,
         authExempt,
         icon: icon.trim() ? normalizeIconInput(icon) : '',
+        locations,
       })
       onOpenChange(false)
       onSaved()
@@ -153,6 +170,27 @@ export function RouteEditDialog({
       setError(e instanceof Error ? e.message : 'Save failed')
     } finally {
       setBusy(false)
+    }
+  }
+
+  async function runTest() {
+    setTesting(true)
+    setTestMsg(null)
+    try {
+      const result = await testUpstream(route!.containerId, route!.index, {
+        host: host || undefined,
+        port: port ? Number(port) : undefined,
+        scheme,
+      })
+      setTestMsg(
+        result.ok
+          ? `OK · ${result.message} (${result.latencyMs}ms)`
+          : `Failed · ${result.message}`,
+      )
+    } catch (e) {
+      setTestMsg(e instanceof Error ? e.message : 'Test failed')
+    } finally {
+      setTesting(false)
     }
   }
 
@@ -242,8 +280,11 @@ export function RouteEditDialog({
           </Section>
 
           <Section icon={Server} title="Upstream" hint="Where NPM forwards traffic for this service.">
-            <Field label="Forward host" description="Container name, IP, or host NPM can reach.">
-              <Input value={host} onChange={(e) => setHost(e.target.value)} placeholder="container-name" />
+            <Field
+              label="Forward host"
+              description="Pick a host NPMplus can reach, or type your own. Candidates include container DNS, aliases, and Docker host."
+            >
+              <HostCombobox value={host} onChange={setHost} candidates={route.candidateHosts ?? []} />
             </Field>
             <div className="grid grid-cols-2 gap-3">
               <Field
@@ -271,6 +312,29 @@ export function RouteEditDialog({
                 </select>
               </Field>
             </div>
+            <div className="flex flex-wrap items-center gap-2 pt-1">
+              <Button type="button" variant="outline" size="sm" disabled={testing || !host || !port} onClick={() => void runTest()}>
+                {testing ? <Loader2 className="size-3.5 animate-spin" /> : <Link2 className="size-3.5" />}
+                Test connection
+              </Button>
+              {testMsg && (
+                <span className={cn('text-xs', testMsg.startsWith('OK') ? 'text-emerald-600' : 'text-destructive')}>
+                  {testMsg}
+                </span>
+              )}
+            </div>
+            <p className="text-[11px] text-muted-foreground">
+              Probe runs from npm-docker-sync (best signal when it shares networks with NPMplus).
+            </p>
+          </Section>
+
+          <Section icon={MapPin} title="Custom locations" hint="Path-based upstreams on this proxy host (NPM Custom Locations).">
+            <CustomLocationsEditor
+              value={locations}
+              onChange={setLocations}
+              routes={allRoutes}
+              excludeKey={`${route.containerId}:${route.index}`}
+            />
           </Section>
 
           <Section icon={Shield} title="TLS & access" hint="Certificate, redirects, and optional auth_request.">
@@ -443,6 +507,51 @@ function PortCombobox({
       <datalist id={listId}>
         {options.map((p) => (
           <option key={p} value={String(p)} />
+        ))}
+      </datalist>
+    </div>
+  )
+}
+
+function HostCombobox({
+  value,
+  onChange,
+  candidates,
+}: {
+  value: string
+  onChange: (v: string) => void
+  candidates: HostCandidate[]
+}) {
+  const listId = 'upstream-host-options'
+  return (
+    <div className="space-y-1.5">
+      {candidates.length > 0 && (
+        <select
+          className="flex h-9 w-full rounded-md border bg-transparent px-3 text-sm"
+          value={candidates.some((c) => c.host === value) ? value : ''}
+          onChange={(e) => {
+            if (e.target.value) onChange(e.target.value)
+          }}
+        >
+          <option value="">Pick detected host…</option>
+          {candidates.map((c) => (
+            <option key={`${c.source}:${c.host}`} value={c.host}>
+              {c.host} — {c.label}
+            </option>
+          ))}
+        </select>
+      )}
+      <Input
+        list={listId}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder="container-name or IP"
+      />
+      <datalist id={listId}>
+        {candidates.map((c) => (
+          <option key={`${c.source}:${c.host}`} value={c.host}>
+            {c.label}
+          </option>
         ))}
       </datalist>
     </div>

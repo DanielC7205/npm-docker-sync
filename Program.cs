@@ -79,6 +79,7 @@ builder.Services.AddSingleton<LabelParser>();
 builder.Services.AddSingleton<DockerNetworkService>();
 builder.Services.AddSingleton<CertificateService>();
 builder.Services.AddSingleton<InstanceIdentifier>();
+builder.Services.AddSingleton<UnavailableFallbackService>();
 builder.Services.AddSingleton<SyncOrchestrator>();
 builder.Services.AddSingleton<NpmMirrorSyncService>();
 builder.Services.AddSingleton<TunnelService>();
@@ -289,6 +290,29 @@ app.MapDelete("/api/routes/{containerId}/{index:int}/override", async (
     }
 });
 
+app.MapPost("/api/routes/{containerId}/{index:int}/test-upstream", async (
+    string containerId,
+    int index,
+    TestUpstreamRequest? body,
+    SyncOrchestrator orchestrator,
+    CancellationToken ct) =>
+{
+    try
+    {
+        var routes = await orchestrator.GetRoutesAsync(ct);
+        var route = routes.FirstOrDefault(r => r.ContainerId == containerId && r.Index == index);
+        var host = body?.Host ?? route?.ForwardHost ?? "";
+        var port = body?.Port ?? route?.ForwardPort ?? 0;
+        var scheme = body?.Scheme ?? route?.ForwardScheme ?? "http";
+        var (ok, message, latencyMs) = await orchestrator.TestUpstreamAsync(host, port, scheme, ct);
+        return Results.Ok(new { ok, message, latencyMs, host, port, scheme });
+    }
+    catch (Exception ex)
+    {
+        return Results.BadRequest(new { error = ex.Message });
+    }
+});
+
 app.MapPost("/api/routes/{containerId}/sync", async (
     string containerId, SyncOrchestrator orchestrator, CancellationToken ct) =>
 {
@@ -343,6 +367,8 @@ app.MapGet("/api/tunnels", (TunnelService tunnels) =>
         t.Label,
         t.CreatedBy,
         disableOnExpire = t.DisableOnExpire,
+        isUnavailable = t.IsUnavailable || t.ExpiresAt <= DateTime.UtcNow,
+        locations = t.Locations,
         createdAt = t.CreatedAt,
     });
     return Results.Ok(list);
@@ -361,6 +387,7 @@ app.MapPost("/api/tunnels", async (TunnelCreateRequest body, TunnelService tunne
             body.Label,
             body.DisableOnExpire ?? false,
             createdBy,
+            body.Locations,
             ct);
         return Results.Ok(new
         {
@@ -372,6 +399,41 @@ app.MapPost("/api/tunnels", async (TunnelCreateRequest body, TunnelService tunne
             tunnel.ForwardHost,
             tunnel.ForwardPort,
             disableOnExpire = tunnel.DisableOnExpire,
+            locations = tunnel.Locations,
+            isUnavailable = tunnel.IsUnavailable,
+        });
+    }
+    catch (Exception ex)
+    {
+        return Results.BadRequest(new { error = ex.Message });
+    }
+});
+
+app.MapPatch("/api/tunnels/{id}", async (string id, TunnelUpdateRequest body, TunnelService tunnels, CancellationToken ct) =>
+{
+    try
+    {
+        var tunnel = await tunnels.UpdateAsync(
+            id,
+            body.Port,
+            body.Scheme,
+            body.Host,
+            body.Label,
+            body.DisableOnExpire,
+            body.Locations,
+            ct);
+        return Results.Ok(new
+        {
+            tunnel.Id,
+            url = $"https://{tunnel.Domain}",
+            expiresAt = tunnel.ExpiresAt,
+            tunnel.ForwardHost,
+            tunnel.ForwardPort,
+            tunnel.ForwardScheme,
+            disableOnExpire = tunnel.DisableOnExpire,
+            locations = tunnel.Locations,
+            isUnavailable = tunnel.IsUnavailable,
+            tunnel.Label,
         });
     }
     catch (Exception ex)
@@ -393,12 +455,12 @@ app.MapDelete("/api/tunnels/{id}", async (string id, TunnelService tunnels, Canc
     }
 });
 
-app.MapPost("/api/tunnels/{id}/extend", (string id, TunnelExtendRequest? body, TunnelService tunnels, CancellationToken ct) =>
+app.MapPost("/api/tunnels/{id}/extend", async (string id, TunnelExtendRequest? body, TunnelService tunnels, CancellationToken ct) =>
 {
     try
     {
-        var tunnel = tunnels.ExtendAsync(id, body?.TtlMinutes, ct).GetAwaiter().GetResult();
-        return Results.Ok(new { tunnel.Id, url = $"https://{tunnel.Domain}", expiresAt = tunnel.ExpiresAt, disableOnExpire = tunnel.DisableOnExpire });
+        var tunnel = await tunnels.ExtendAsync(id, body?.TtlMinutes, ct);
+        return Results.Ok(new { tunnel.Id, url = $"https://{tunnel.Domain}", expiresAt = tunnel.ExpiresAt, disableOnExpire = tunnel.DisableOnExpire, isUnavailable = tunnel.IsUnavailable });
     }
     catch (Exception ex)
     {
@@ -450,7 +512,9 @@ finally
 }
 
 public record EnableRequest(bool Enabled);
-public record TunnelCreateRequest(int Port, string? Scheme, string? Host, int? TtlMinutes, string? Label, bool? DisableOnExpire);
+public record TestUpstreamRequest(string? Host, int? Port, string? Scheme);
+public record TunnelCreateRequest(int Port, string? Scheme, string? Host, int? TtlMinutes, string? Label, bool? DisableOnExpire, List<CustomLocation>? Locations);
+public record TunnelUpdateRequest(int? Port, string? Scheme, string? Host, string? Label, bool? DisableOnExpire, List<CustomLocation>? Locations);
 public record TunnelExtendRequest(int? TtlMinutes);
 
 class ShortSourceContextEnricher : ILogEventEnricher

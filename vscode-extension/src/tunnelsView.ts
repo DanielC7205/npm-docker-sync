@@ -6,9 +6,19 @@ export interface TunnelListItem {
   expiresAt: string;
   forwardPort: number;
   forwardHost?: string;
+  forwardScheme?: string;
   label?: string | null;
   domain?: string;
   disableOnExpire?: boolean | null;
+  isUnavailable?: boolean | null;
+  locations?: Array<{
+    mode?: string;
+    path: string;
+    forwardScheme?: string | null;
+    forwardHost?: string | null;
+    forwardPort?: number | null;
+    forwardPath?: string | null;
+  }> | null;
 }
 
 export function formatExpiry(expiresAt: string, now = Date.now()): {
@@ -56,27 +66,31 @@ export class TunnelItem extends vscode.TreeItem {
 
     const expiry = formatExpiry(tunnel.expiresAt);
     this.id = tunnel.id;
-    this.description = `:${tunnel.forwardPort} · ${expiry.short}`;
+    const unavailable = !!tunnel.isUnavailable || expiry.expired;
+    this.description = unavailable
+      ? `:${tunnel.forwardPort} · Unavailable → fallback`
+      : `:${tunnel.forwardPort} · ${expiry.short}`;
     this.tooltip = new vscode.MarkdownString(
       [
         `**${tunnel.url}**`,
         '',
         `Forward: \`${tunnel.forwardHost ?? '?'}:${tunnel.forwardPort}\``,
         `Expires: ${expiry.full} (${expiry.short})`,
+        unavailable ? 'Status: Unavailable (fallback page)' : '',
         tunnel.disableOnExpire
-          ? 'Persist mode: on expiry the tunnel is disabled (kept)'
+          ? 'Persist mode: on expiry the tunnel is retargeted to unavailable / disabled'
           : 'Auto mode: on expiry the tunnel is deleted',
         '',
-        'Use **Extend** to add more time.',
-      ].join('\n'),
+        'Use **Extend** to add more time, or **Edit** to change upstream.',
+      ].filter(Boolean).join('\n'),
     );
     this.iconPath = new vscode.ThemeIcon(
-      expiry.expired ? 'error' : expiry.urgent ? 'warning' : 'globe',
-      expiry.expired || expiry.urgent
-        ? new vscode.ThemeColor(expiry.expired ? 'errorForeground' : 'editorWarning.foreground')
+      unavailable ? 'error' : expiry.urgent ? 'warning' : 'globe',
+      unavailable || expiry.urgent
+        ? new vscode.ThemeColor(unavailable ? 'errorForeground' : 'editorWarning.foreground')
         : undefined,
     );
-    this.contextValue = expiry.expired ? 'tunnelExpired' : 'tunnel';
+    this.contextValue = unavailable ? 'tunnelExpired' : 'tunnel';
     this.command = {
       command: 'npmDockerSync.openTunnelUrl',
       title: 'Open',

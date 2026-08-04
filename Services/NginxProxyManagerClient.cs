@@ -378,6 +378,7 @@ public class NginxProxyManagerClient
             NpmplusAuthRequest = existing.NpmplusAuthRequest ?? "none",
             NpmplusAuthRequestUpstream = existing.NpmplusAuthRequestUpstream ?? string.Empty,
             Meta = meta,
+            Locations = existing.Locations ?? new List<ProxyLocationRequest>(),
         };
 
         return await UpdateProxyHostAsync(hostId, request, cancellationToken);
@@ -663,6 +664,9 @@ public class ProxyHost
 
     [JsonPropertyName("npmplus_auth_request_upstream")]
     public string? NpmplusAuthRequestUpstream { get; set; }
+
+    [JsonPropertyName("locations")]
+    public List<ProxyLocationRequest>? Locations { get; set; }
 }
 
 public class ProxyHostRequest
@@ -731,7 +735,7 @@ public class ProxyHostRequest
     public string NpmplusAuthRequestUpstream { get; set; } = string.Empty;
 
     [JsonPropertyName("locations")]
-    public List<object> Locations { get; set; } = new();
+    public List<ProxyLocationRequest> Locations { get; set; } = new();
 }
 
 public class Certificate

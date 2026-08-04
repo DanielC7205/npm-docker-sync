@@ -88,6 +88,12 @@
         "title": "Extend…",
         "icon": "$(history)",
         "category": "NPM Docker Sync"
+      },
+      {
+        "command": "npmDockerSync.editTunnel",
+        "title": "Edit…",
+        "icon": "$(edit)",
+        "category": "NPM Docker Sync"
       }
     ],
     "menus": {
@@ -104,6 +110,11 @@
         }
       ],
       "view/item/context": [
+        {
+          "command": "npmDockerSync.editTunnel",
+          "when": "view == npmDockerSync.tunnelsView && viewItem =~ /^tunnel/",
+          "group": "inline@0"
+        },
         {
           "command": "npmDockerSync.extendTunnel",
           "when": "view == npmDockerSync.tunnelsView && viewItem =~ /^tunnel/",
@@ -140,6 +151,10 @@
         },
         {
           "command": "npmDockerSync.extendTunnel",
+          "when": "false"
+        },
+        {
+          "command": "npmDockerSync.editTunnel",
           "when": "false"
         }
       ]

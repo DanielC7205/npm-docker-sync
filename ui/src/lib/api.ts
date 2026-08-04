@@ -1,5 +1,22 @@
 export type RouteStatus = 'Synced' | 'Missing' | 'Disabled' | 'Excluded' | 'Conflict'
 
+export interface CustomLocation {
+  mode: 'manual' | 'linked' | string
+  path: string
+  forwardScheme?: string | null
+  forwardHost?: string | null
+  forwardPort?: number | null
+  forwardPath?: string | null
+  linkedContainerId?: string | null
+  linkedProxyIndex?: number | null
+}
+
+export interface HostCandidate {
+  host: string
+  label: string
+  source: string
+}
+
 export interface RouteInfo {
   containerId: string
   containerName: string
@@ -10,6 +27,8 @@ export interface RouteInfo {
   category?: string | null
   domains: string[]
   candidatePorts?: number[]
+  candidateHosts?: HostCandidate[]
+  locations?: CustomLocation[] | null
   forwardHost?: string | null
   forwardPort?: number | null
   forwardScheme?: string | null
@@ -30,6 +49,7 @@ export interface RouteInfo {
   authExempt?: boolean | null
   hidden?: boolean
   hasUiOverride?: boolean
+  isUnavailable?: boolean
   komodoUrl?: string | null
   komodoResourceType?: string | null
   komodoResourceName?: string | null
@@ -62,6 +82,8 @@ export interface TunnelInfo {
   npmHostId?: number | null
   expiresAt: string
   disableOnExpire?: boolean | null
+  isUnavailable?: boolean | null
+  locations?: CustomLocation[] | null
   label?: string | null
   createdBy?: string | null
   createdAt: string
@@ -138,6 +160,16 @@ export const syncRoute = (containerId: string) =>
     method: 'POST',
   })
 
+export const testUpstream = (
+  containerId: string,
+  index: number,
+  body: { host?: string; port?: number; scheme?: string },
+) =>
+  api<{ ok: boolean; message: string; latencyMs: number; host: string; port: number; scheme: string }>(
+    `/api/routes/${encodeURIComponent(containerId)}/${index}/test-upstream`,
+    { method: 'POST', body: JSON.stringify(body) },
+  )
+
 export const fetchTunnels = () => api<TunnelInfo[]>('/api/tunnels')
 export const createTunnel = (body: {
   port: number
@@ -146,8 +178,24 @@ export const createTunnel = (body: {
   ttlMinutes?: number
   label?: string
   disableOnExpire?: boolean
+  locations?: CustomLocation[]
 }) =>
   api<TunnelInfo>('/api/tunnels', { method: 'POST', body: JSON.stringify(body) })
+export const updateTunnel = (
+  id: string,
+  body: {
+    port?: number
+    scheme?: string
+    host?: string
+    label?: string
+    disableOnExpire?: boolean
+    locations?: CustomLocation[]
+  },
+) =>
+  api<TunnelInfo>(`/api/tunnels/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(body),
+  })
 export const deleteTunnel = (id: string) =>
   api<{ success: boolean }>(`/api/tunnels/${encodeURIComponent(id)}`, { method: 'DELETE' })
 export const extendTunnel = (id: string, ttlMinutes?: number) =>

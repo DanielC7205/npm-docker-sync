@@ -32,6 +32,7 @@ type FieldDef = {
   secret?: boolean
   bool?: boolean
   placeholder?: string
+  chips?: boolean
 }
 
 type SectionDef = {
@@ -112,9 +113,22 @@ const SECTIONS: SectionDef[] = [
       },
       {
         key: 'AUTO_BRIDGE_EXCLUDE',
-        label: 'Auto-bridge excludes',
-        description: 'Comma-separated name substrings to skip (e.g. npmplus, npm-docker-sync).',
+        label: 'Never bridge keywords',
+        description: 'Comma-separated substrings matched against container name and image. Matching containers are skipped for auto-bridge and labeled sync.',
         placeholder: 'npmplus,npm-docker-sync,nginx-proxy-manager',
+        chips: true,
+      },
+      {
+        key: 'UNAVAILABLE_FALLBACK_ENABLED',
+        label: 'Unavailable fallback page',
+        description: 'When a service stops or a persist tunnel expires, retarget the NPM host to this app’s /unavailable page instead of a dead upstream.',
+        bool: true,
+      },
+      {
+        key: 'FALLBACK_FORWARD_HOST',
+        label: 'Fallback forward host',
+        description: 'How NPMplus reaches this sync UI for the unavailable page. Defaults to DOCKER_HOST_IP / host.docker.internal.',
+        placeholder: 'npm-docker-sync or host.docker.internal',
       },
       {
         key: 'NPM_PROXY_SSL_FORCE',
@@ -480,6 +494,31 @@ export function SettingsPage({ auth }: { auth: AuthStatus | null }) {
             aria-label="Search settings"
           />
         </div>
+
+        {/* Mobile section chips */}
+        <div className="sticky top-14 z-30 -mx-1 overflow-x-auto px-1 py-1 lg:hidden">
+          <div className="flex w-max gap-1.5">
+            {filteredSections.map((section) => {
+              const Icon = section.icon
+              return (
+                <button
+                  key={section.id}
+                  type="button"
+                  onClick={() => scrollToSection(section.id)}
+                  className={cn(
+                    'inline-flex h-9 items-center gap-1.5 rounded-full border px-3 text-xs whitespace-nowrap transition-colors',
+                    activeSection === section.id
+                      ? 'border-foreground/20 bg-accent text-accent-foreground'
+                      : 'bg-background text-muted-foreground hover:bg-accent/50',
+                  )}
+                >
+                  <Icon className="size-3.5 shrink-0" />
+                  {section.title}
+                </button>
+              )
+            })}
+          </div>
+        </div>
       </div>
 
       {error && <p className="mb-4 text-sm text-destructive">{error}</p>}
@@ -624,6 +663,8 @@ function FieldRow({
               onCheckedChange={(v) => onChange(String(v))}
             />
           </div>
+        ) : field.chips ? (
+          <KeywordChipsInput id={field.key} value={value} disabled={!canEdit} onChange={onChange} placeholder={field.placeholder} />
         ) : (
           <Input
             id={field.key}
@@ -640,6 +681,82 @@ function FieldRow({
           />
         )}
       </div>
+    </div>
+  )
+}
+
+function KeywordChipsInput({
+  id,
+  value,
+  disabled,
+  onChange,
+  placeholder,
+}: {
+  id: string
+  value: string
+  disabled?: boolean
+  onChange: (v: string) => void
+  placeholder?: string
+}) {
+  const [draft, setDraft] = useState('')
+  const tags = value
+    .split(',')
+    .map((t) => t.trim())
+    .filter(Boolean)
+
+  function commit(raw: string) {
+    const parts = raw
+      .split(/[,\s]+/)
+      .map((t) => t.trim())
+      .filter(Boolean)
+    if (parts.length === 0) return
+    const next = [...new Set([...tags, ...parts])]
+    onChange(next.join(','))
+    setDraft('')
+  }
+
+  function remove(tag: string) {
+    onChange(tags.filter((t) => t !== tag).join(','))
+  }
+
+  return (
+    <div className="space-y-2">
+      <div className="flex min-h-9 flex-wrap gap-1.5 rounded-md border bg-transparent p-1.5">
+        {tags.map((tag) => (
+          <button
+            key={tag}
+            type="button"
+            disabled={disabled}
+            onClick={() => remove(tag)}
+            className="inline-flex items-center gap-1 rounded-md bg-muted px-2 py-0.5 text-xs hover:bg-muted/80 disabled:opacity-50"
+            title="Remove"
+          >
+            {tag}
+            <span className="text-muted-foreground">×</span>
+          </button>
+        ))}
+        <input
+          id={id}
+          className="min-w-[8rem] flex-1 bg-transparent px-1 text-sm outline-none disabled:opacity-50"
+          value={draft}
+          disabled={disabled}
+          placeholder={tags.length === 0 ? placeholder : 'Add keyword…'}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ',') {
+              e.preventDefault()
+              commit(draft)
+            }
+            if (e.key === 'Backspace' && !draft && tags.length) {
+              remove(tags[tags.length - 1]!)
+            }
+          }}
+          onBlur={() => {
+            if (draft.trim()) commit(draft)
+          }}
+        />
+      </div>
+      <p className="text-[11px] text-muted-foreground">Press Enter or comma to add. Click a chip to remove.</p>
     </div>
   )
 }

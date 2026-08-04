@@ -67,11 +67,15 @@ public class SyncOrchestrator
         _komodoClient = komodoClient;
 
         _mirrorSyncService = serviceProvider.GetService(typeof(NpmMirrorSyncService)) as NpmMirrorSyncService;
+        _fallback = new Lazy<UnavailableFallbackService>(() =>
+            serviceProvider.GetRequiredService<UnavailableFallbackService>());
 
         _logger.LogInformation("Using normalized NPM URL: {NpmUrl}", NpmUrl);
         if (AdoptExisting)
             _logger.LogInformation("NPM_ADOPT_EXISTING is enabled — unmanaged overlapping proxy hosts will be claimed");
     }
+
+    private readonly Lazy<UnavailableFallbackService> _fallback;
 
     public async Task RestoreStateFromNpm(DockerClient dockerClient, CancellationToken cancellationToken)
     {
@@ -167,6 +171,20 @@ public class SyncOrchestrator
             await EnsureInstanceIdAsync(cancellationToken);
 
             _containerNames[containerId] = containerName;
+
+            if (MatchesNeverBridgeKeywords(containerName, null))
+            {
+                _logger.LogInformation("Skipping container {ContainerName} — matches never-bridge keywords", containerName);
+                if (_containerProxyMap.Keys.Any(k => k.StartsWith($"{containerId}:")) ||
+                    _containerStreamMap.Keys.Any(k => k.StartsWith($"{containerId}:")))
+                {
+                    await ProcessProxyHosts(containerId, containerName, new Dictionary<int, ProxyConfiguration>(), cancellationToken);
+                    await ProcessStreams(containerId, containerName, new Dictionary<int, StreamConfiguration>(), cancellationToken);
+                    _containerLabelHashes.TryRemove(containerId, out _);
+                    _lastProxyConfigs.TryRemove(containerId, out _);
+                }
+                return;
+            }
 
             var proxyConfigs = _labelParser.ParseLabels(labels);
             var streamConfigs = _labelParser.ParseStreamLabels(labels);
@@ -351,6 +369,47 @@ public class SyncOrchestrator
         if (!_containerProxyMap.TryGetValue(proxyKey, out var hostId))
             throw new InvalidOperationException($"No synced proxy host for container {containerId} index {index}");
 
+        if (!enabled && _fallback.Value.IsEnabled())
+        {
+            var name = _containerNames.GetValueOrDefault(containerId) ?? containerId[..Math.Min(12, containerId.Length)];
+            await _fallback.Value.RetargetHostAsync(hostId, "service", name, "disabled", cancellationToken);
+            _uiDisabledProxies[proxyKey] = true;
+            _logger.LogInformation("Proxy {ProxyKey} (host {HostId}) retargeted to unavailable fallback", proxyKey, hostId);
+            return;
+        }
+
+        if (enabled && _fallback.Value.IsEnabled())
+        {
+            try
+            {
+                var existing = await _npmClient.GetProxyHostByIdAsync(hostId, cancellationToken);
+                if (existing != null && UnavailableFallbackService.IsMarkedUnavailable(existing))
+                {
+                    string host = existing.ForwardHost ?? "";
+                    int port = existing.ForwardPort;
+                    string scheme = existing.ForwardScheme ?? "http";
+                    List<CustomLocation>? locations = null;
+                    if (_lastProxyConfigs.TryGetValue(containerId, out var map) && map.TryGetValue(index, out var cfg))
+                    {
+                        if (!string.IsNullOrWhiteSpace(cfg.ForwardHost)) host = cfg.ForwardHost;
+                        if (cfg.ForwardPort.HasValue) port = cfg.ForwardPort.Value;
+                        if (!string.IsNullOrWhiteSpace(cfg.ForwardScheme)) scheme = cfg.ForwardScheme;
+                        locations = cfg.Locations;
+                    }
+
+                    await _fallback.Value.RestoreHostAsync(hostId, host, port, scheme,
+                        LabelParser.ToProxyLocationRequests(locations), cancellationToken);
+                    _uiDisabledProxies.TryRemove(proxyKey, out _);
+                    _logger.LogInformation("Proxy {ProxyKey} restored from unavailable fallback", proxyKey);
+                    return;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to restore from fallback for {ProxyKey}", proxyKey);
+            }
+        }
+
         await _npmClient.SetProxyHostEnabledAsync(hostId, enabled, cancellationToken);
 
         if (enabled)
@@ -398,6 +457,22 @@ public class SyncOrchestrator
                     Status = RouteStatus.Excluded,
                     Category = "Docker",
                     LabelSource = "godoxy",
+                });
+                continue;
+            }
+
+            if (MatchesNeverBridgeKeywords(containerName, container.Image))
+            {
+                routes.Add(new RouteInfo
+                {
+                    ContainerId = containerId,
+                    ContainerName = containerName,
+                    Index = 0,
+                    Name = containerName,
+                    Domains = new List<string>(),
+                    Status = RouteStatus.Excluded,
+                    Category = "Docker",
+                    LabelSource = "blocked",
                 });
                 continue;
             }
@@ -528,6 +603,8 @@ public class SyncOrchestrator
                     Hidden = routeOverride?.Hidden == true,
                     HasUiOverride = routeOverride != null,
                     CandidatePorts = await _networkService.ListCandidatePortsAsync(containerId, cancellationToken),
+                    CandidateHosts = await _networkService.ListCandidateHostsAsync(containerId, cancellationToken),
+                    Locations = config.Locations,
                     KomodoUrl = komodo?.Url,
                     KomodoResourceType = komodo?.ResourceType,
                     KomodoResourceName = komodo?.ResourceName,
@@ -622,6 +699,7 @@ public class SyncOrchestrator
     {
         ApplyRouteOverride(containerId, index, config);
         ApplyDefaultAuthRequest(config);
+        await ResolveLinkedLocationsAsync(config, cancellationToken);
 
         if (string.IsNullOrEmpty(config.ForwardHost))
         {
@@ -770,12 +848,26 @@ public class SyncOrchestrator
                 return;
             }
 
-            _logger.LogInformation("Removing {ProxyCount} proxy(s) and {StreamCount} stream(s) for container {ContainerName}",
+            _logger.LogInformation("Retargeting {ProxyCount} proxy(s) / removing {StreamCount} stream(s) for stopped container {ContainerName}",
                 proxyKeys.Count, streamKeys.Count, containerName);
 
             foreach (var proxyKey in proxyKeys)
             {
                 var index = int.Parse(proxyKey.Split(':')[1]);
+                if (_fallback.Value.IsEnabled() && _containerProxyMap.TryGetValue(proxyKey, out var hostId))
+                {
+                    try
+                    {
+                        await _fallback.Value.RetargetHostAsync(hostId, "service", containerName, "stopped", cancellationToken);
+                        _uiDisabledProxies[proxyKey] = true;
+                        continue;
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Fallback retarget failed for {ProxyKey}; deleting instead", proxyKey);
+                    }
+                }
+
                 await RemoveProxy(containerId, containerName, index, cancellationToken);
                 _uiDisabledProxies.TryRemove(proxyKey, out _);
             }
@@ -965,9 +1057,150 @@ public class SyncOrchestrator
         bool uiDisabled,
         CancellationToken cancellationToken)
     {
+        await ResolveLinkedLocationsAsync(config, cancellationToken);
         var request = _labelParser.ToProxyHostRequest(config, containerId, _instanceId!, NpmUrl, uiDisabled);
+
+        // Preserve NPM locations when override did not set them
+        if (config.Locations == null)
+        {
+            try
+            {
+                var existing = await _npmClient.GetProxyHostByIdAsync(hostId, cancellationToken);
+                if (existing?.Locations != null)
+                    request.Locations = existing.Locations;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Could not preserve locations for host {HostId}", hostId);
+            }
+        }
+
         var updated = await _npmClient.UpdateProxyHostAsync(hostId, request, cancellationToken);
         RecordCreatedProxy(proxyKey, updated.Id, config, uiDisabled);
+    }
+
+    /// <summary>Resolve linked custom locations to concrete upstream targets.</summary>
+    public async Task ResolveLinkedLocationsAsync(ProxyConfiguration config, CancellationToken cancellationToken)
+    {
+        if (config.Locations == null || config.Locations.Count == 0)
+            return;
+
+        foreach (var loc in config.Locations)
+        {
+            if (!string.Equals(loc.Mode, "linked", StringComparison.OrdinalIgnoreCase))
+                continue;
+            if (string.IsNullOrWhiteSpace(loc.LinkedContainerId))
+                continue;
+
+            var linkedIndex = loc.LinkedProxyIndex ?? 0;
+            ProxyConfiguration? linked = null;
+
+            if (_lastProxyConfigs.TryGetValue(loc.LinkedContainerId, out var map) &&
+                map.TryGetValue(linkedIndex, out var cached))
+            {
+                linked = cached;
+            }
+
+            if (linked == null)
+            {
+                // Best-effort: use route override + inferred host for linked container
+                linked = new ProxyConfiguration { Index = linkedIndex };
+                ApplyRouteOverride(loc.LinkedContainerId, linkedIndex, linked);
+            }
+
+            var host = linked.ForwardHost;
+            var port = linked.ForwardPort;
+            var scheme = linked.ForwardScheme;
+
+            if (string.IsNullOrWhiteSpace(host))
+            {
+                try
+                {
+                    host = await _networkService.InferForwardHost(loc.LinkedContainerId, null, cancellationToken);
+                }
+                catch
+                {
+                    // leave empty
+                }
+            }
+
+            if (!port.HasValue)
+            {
+                try
+                {
+                    port = await _networkService.InferForwardPort(loc.LinkedContainerId, cancellationToken);
+                }
+                catch
+                {
+                    // leave empty
+                }
+            }
+
+            loc.ForwardHost = host ?? string.Empty;
+            loc.ForwardPort = port;
+            loc.ForwardScheme = string.IsNullOrWhiteSpace(scheme) ? "http" : scheme;
+        }
+    }
+
+    public bool MatchesNeverBridgeKeywords(string containerName, string? image)
+    {
+        var excludeRaw = _settings.Get("AUTO_BRIDGE_EXCLUDE")
+            ?? "npmplus,npm-docker-sync,nginx-proxy-manager";
+        var excludes = excludeRaw.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (excludes.Length == 0) return false;
+
+        foreach (var ex in excludes)
+        {
+            if (containerName.Contains(ex, StringComparison.OrdinalIgnoreCase))
+                return true;
+            if (!string.IsNullOrEmpty(image) && image.Contains(ex, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        return false;
+    }
+
+    public async Task<(bool Ok, string Message, long LatencyMs)> TestUpstreamAsync(
+        string host,
+        int port,
+        string? scheme,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(host) || port <= 0 || port > 65535)
+            return (false, "Host and port are required", 0);
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        try
+        {
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            cts.CancelAfter(TimeSpan.FromSeconds(3));
+            using var client = new System.Net.Sockets.TcpClient();
+            await client.ConnectAsync(host.Trim(), port, cts.Token);
+            sw.Stop();
+
+            var schemeNorm = (scheme ?? "http").Trim().ToLowerInvariant();
+            if (schemeNorm is "http" or "https")
+            {
+                try
+                {
+                    using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(3) };
+                    var uri = $"{schemeNorm}://{host.Trim()}:{port}/";
+                    using var resp = await http.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+                    return (true, $"TCP ok · HTTP {(int)resp.StatusCode} {resp.ReasonPhrase}", sw.ElapsedMilliseconds);
+                }
+                catch (Exception httpEx)
+                {
+                    return (true, $"TCP ok · HTTP probe failed: {httpEx.Message}", sw.ElapsedMilliseconds);
+                }
+            }
+
+            return (true, "TCP connection succeeded", sw.ElapsedMilliseconds);
+        }
+        catch (Exception ex)
+        {
+            sw.Stop();
+            return (false, ex.Message, sw.ElapsedMilliseconds);
+        }
     }
 
     private void RecordCreatedProxy(string proxyKey, int hostId, ProxyConfiguration config, bool uiDisabled)
@@ -1078,6 +1311,9 @@ public class SyncOrchestrator
             config.Homepage ??= new HomepageInfo();
             config.Homepage.Icon = IconResolver.NormalizeIconUrl(ov.Icon) ?? string.Empty;
         }
+
+        if (ov.Locations != null)
+            config.Locations = ov.Locations;
     }
 
     private string ExpandDomainAlias(string alias)
@@ -1141,6 +1377,7 @@ public class SyncOrchestrator
                 ? null
                 : IconResolver.NormalizeIconUrl(patch.Icon);
         if (patch.AdvancedConfig != null) target.AdvancedConfig = patch.AdvancedConfig;
+        if (patch.Locations != null) target.Locations = patch.Locations;
     }
 
     private async Task EnsureInstanceIdAsync(CancellationToken cancellationToken)
@@ -1212,6 +1449,9 @@ public class RouteInfo
     public bool Hidden { get; set; }
     public bool HasUiOverride { get; set; }
     public List<int> CandidatePorts { get; set; } = new();
+    public List<HostCandidate> CandidateHosts { get; set; } = new();
+    public List<CustomLocation>? Locations { get; set; }
+    public bool IsUnavailable { get; set; }
     public string? KomodoUrl { get; set; }
     public string? KomodoResourceType { get; set; }
     public string? KomodoResourceName { get; set; }
