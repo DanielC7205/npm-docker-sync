@@ -61,8 +61,9 @@ dotnet build NpmDockerSync.csproj -warnaserror
 **DockerNetworkService** (Network Intelligence)
 - Detects which Docker networks the NPM container is on (if `NPM_CONTAINER_NAME` configured)
 - Auto-infers `npm.proxy.host` based on network topology:
-  - Same network as NPM → use container name (Docker DNS)
-  - Different network → use Docker host IP (bridge gateway or `host.docker.internal`)
+  - NPM uses host networking → use container bridge IP (GoDoxy-style; no published ports)
+  - Same bridge/overlay as NPM → use container name (Docker DNS)
+  - Different network (bridge NPM) → use Docker host IP (published ports required)
 - Caches network detection results for performance
 
 **LabelParser** (Configuration Parsing)
@@ -97,12 +98,12 @@ This approach handles:
 
 When `NPM_CONTAINER_NAME` is configured:
 
-1. **Initialization**: Find NPM container, extract its networks
+1. **Initialization**: Find NPM container, extract its networks; detect host networking (`NetworkMode=host`)
 2. **Per-container inference**:
-   - Inspect target container's networks
-   - Check for intersection with NPM networks
-   - If shared network exists → `npm.proxy.host = container_name`
-   - If no shared network → `npm.proxy.host = docker_host_ip`
+   - Inspect target container's networks / IPs
+   - If NPM is host-networked → use container bridge IP (or `127.0.0.1` if target is also host-networked)
+   - Else if shared bridge/overlay with NPM → `npm.proxy.host = container_name`
+   - Else → `npm.proxy.host = docker_host_ip` (needs published ports)
 3. **Fallback chain** for Docker host IP:
    - User-provided `DOCKER_HOST_IP` env var
    - Bridge network gateway IP

@@ -13,6 +13,7 @@ public class DockerNetworkService
     private readonly string? _dockerHostIp;
     private string? _detectedDockerHostIp;
     private HashSet<string>? _npmNetworks;
+    private bool _npmIsHostNetwork;
 
     public DockerNetworkService(
         ILogger<DockerNetworkService> logger,
@@ -43,9 +44,11 @@ public class DockerNetworkService
             _detectedDockerHostIp = _dockerHostIp;
         }
 
-        _logger.LogInformation("Network detection initialized. Docker Host IP: {HostIp}, NPM Networks: {Networks}",
+        _logger.LogInformation(
+            "Network detection initialized. Docker Host IP: {HostIp}, NPM Networks: {Networks}, NPM host mode: {HostMode}",
             _detectedDockerHostIp ?? "not detected",
-            _npmNetworks != null ? string.Join(", ", _npmNetworks) : "not detected");
+            _npmNetworks != null ? string.Join(", ", _npmNetworks) : "not detected",
+            _npmIsHostNetwork);
     }
 
     private async Task DetectNpmNetworks(CancellationToken cancellationToken)
@@ -75,6 +78,13 @@ public class DockerNetworkService
                 _npmNetworks = containerDetails.NetworkSettings.Networks.Keys.ToHashSet();
                 _logger.LogInformation("NPM container found on networks: {Networks}",
                     string.Join(", ", _npmNetworks));
+            }
+
+            _npmIsHostNetwork = IsHostNetworkMode(containerDetails);
+            if (_npmIsHostNetwork)
+            {
+                _logger.LogInformation(
+                    "NPM container uses host networking — will forward to container bridge IPs (no published ports required)");
             }
         }
         catch (Exception ex)
@@ -156,6 +166,33 @@ public class DockerNetworkService
             var containerName = container.Name.TrimStart('/');
             var containerNetworks = container.NetworkSettings?.Networks?.Keys.ToHashSet()
                 ?? new HashSet<string>();
+            var targetIsHostNetwork = IsHostNetworkMode(container);
+
+            // NPMplus/GoDoxy-style host networking: the proxy shares the host netns and can
+            // reach any container's bridge IP:internal-port without publishing ports.
+            if (_npmIsHostNetwork)
+            {
+                if (targetIsHostNetwork)
+                {
+                    _logger.LogInformation(
+                        "Container {ContainerName} also uses host networking. Using 127.0.0.1 as forward host.",
+                        containerName);
+                    return "127.0.0.1";
+                }
+
+                var hostModeIp = GetBestContainerIp(container, preferredNetwork);
+                if (!string.IsNullOrEmpty(hostModeIp))
+                {
+                    _logger.LogInformation(
+                        "NPM is host-networked. Using container IP {Ip} for {ContainerName} (no published port needed).",
+                        hostModeIp, containerName);
+                    return hostModeIp;
+                }
+
+                _logger.LogWarning(
+                    "NPM is host-networked but no IP found for {ContainerName}; falling back to other strategies",
+                    containerName);
+            }
 
             // GoDoxy proxy.network: prefer that network when the container is attached
             if (!string.IsNullOrEmpty(preferredNetwork) && containerNetworks.Contains(preferredNetwork))
@@ -166,12 +203,15 @@ public class DockerNetworkService
                 return containerName;
             }
 
-            // Check if container is on the same network as NPM
+            // Shared bridge/overlay networks (ignore "host"/"none" — those are not Docker DNS)
             if (_npmNetworks != null && containerNetworks.Count > 0)
             {
-                var sharedNetworks = _npmNetworks.Intersect(containerNetworks).ToList();
+                var sharedNetworks = _npmNetworks
+                    .Intersect(containerNetworks)
+                    .Where(n => !IsPseudoNetwork(n))
+                    .ToList();
 
-                if (sharedNetworks.Any())
+                if (sharedNetworks.Count > 0)
                 {
                     _logger.LogInformation("Container {ContainerName} shares network(s) with NPM: {Networks}. Using container name as forward host.",
                         containerName, string.Join(", ", sharedNetworks));
@@ -179,7 +219,7 @@ public class DockerNetworkService
                 }
             }
 
-            // Container is not on the same network, use Docker host IP
+            // Different bridge networks: published host port path
             if (!string.IsNullOrEmpty(_detectedDockerHostIp))
             {
                 _logger.LogInformation("Container {ContainerName} is not on NPM network. Using Docker host IP: {HostIp}",
@@ -198,6 +238,62 @@ public class DockerNetworkService
             throw;
         }
     }
+
+    /// <summary>
+    /// Pick a routable container IP. Prefer <paramref name="preferredNetwork"/>, then
+    /// user-defined networks over the default <c>bridge</c>.
+    /// </summary>
+    private static string? GetBestContainerIp(ContainerInspectResponse container, string? preferredNetwork)
+    {
+        var networks = container.NetworkSettings?.Networks;
+        if (networks == null || networks.Count == 0)
+            return null;
+
+        static bool Usable(EndpointSettings? ep) =>
+            ep != null &&
+            !string.IsNullOrWhiteSpace(ep.IPAddress) &&
+            ep.IPAddress != "0.0.0.0";
+
+        if (!string.IsNullOrEmpty(preferredNetwork) &&
+            networks.TryGetValue(preferredNetwork, out var preferred) &&
+            Usable(preferred))
+        {
+            return preferred.IPAddress;
+        }
+
+        string? bridgeIp = null;
+        foreach (var (name, endpoint) in networks)
+        {
+            if (IsPseudoNetwork(name) || !Usable(endpoint))
+                continue;
+
+            if (!string.Equals(name, "bridge", StringComparison.OrdinalIgnoreCase))
+                return endpoint.IPAddress;
+
+            bridgeIp ??= endpoint.IPAddress;
+        }
+
+        return bridgeIp;
+    }
+
+    private static bool IsHostNetworkMode(ContainerInspectResponse container)
+    {
+        var mode = container.HostConfig?.NetworkMode;
+        if (!string.IsNullOrEmpty(mode) &&
+            mode.Equals("host", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        var networks = container.NetworkSettings?.Networks;
+        return networks != null &&
+               networks.Count > 0 &&
+               networks.Keys.All(n => n.Equals("host", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool IsPseudoNetwork(string name) =>
+        name.Equals("host", StringComparison.OrdinalIgnoreCase) ||
+        name.Equals("none", StringComparison.OrdinalIgnoreCase);
 
     public async Task<int?> InferForwardPort(string containerId, CancellationToken cancellationToken)
     {
@@ -244,7 +340,17 @@ public class DockerNetworkService
 
             var sharesNpm = false;
             if (_npmNetworks != null && networks != null)
-                sharesNpm = networks.Keys.Any(n => _npmNetworks.Contains(n));
+            {
+                sharesNpm = networks.Keys.Any(n =>
+                    _npmNetworks.Contains(n) && !IsPseudoNetwork(n));
+            }
+
+            if (_npmIsHostNetwork && IsHostNetworkMode(container))
+                Add("127.0.0.1", "Localhost (both host-networked)", "host-local");
+
+            var bestIp = _npmIsHostNetwork ? GetBestContainerIp(container, null) : null;
+            if (!string.IsNullOrEmpty(bestIp))
+                Add(bestIp, "Container bridge IP (NPM host mode)", "host-mode-ip");
 
             Add(containerName,
                 sharesNpm ? "Container DNS (shared network with NPM)" : "Container DNS name",
@@ -267,7 +373,9 @@ public class DockerNetworkService
                     var ip = endpoint.IPAddress;
                     if (!string.IsNullOrWhiteSpace(ip) && ip != "0.0.0.0")
                     {
-                        var onNpm = _npmNetworks != null && _npmNetworks.Contains(netName);
+                        var onNpm = _npmNetworks != null &&
+                                    _npmNetworks.Contains(netName) &&
+                                    !IsPseudoNetwork(netName);
                         Add(ip,
                             onNpm ? $"Container IP on {netName} (NPM network)" : $"Container IP on {netName}",
                             onNpm ? "shared-ip" : "ip");

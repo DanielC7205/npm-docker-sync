@@ -91,7 +91,7 @@ Add labels to your containers to configure proxy hosts. Supports both `npm.` and
   - **Auto-detected if omitted**: Uses first exposed port from container's EXPOSE directive or -p port mappings
   - If no port is specified and auto-detection fails, proxy creation will be skipped with an error
 - `npm.proxy.host`: Target host to forward to (e.g., `myapp` or `192.168.1.100`)
-  - **Auto-detected if omitted**: Uses container name if on same network as NPM, otherwise uses Docker host IP
+  - **Auto-detected if omitted**: Container bridge IP when NPM uses host networking (no published ports needed); container name on a shared Docker network; otherwise Docker host IP
 - `npm.proxy.scheme`: Forward scheme (`http` or `https`, default: `http`)
 - `npm.proxy.ssl.force`: Force SSL redirect (`true`/`false`, default: `false` or `NPM_PROXY_SSL_FORCE`)
 - `npm.proxy.ssl.certificate.id`: SSL certificate ID from NPM
@@ -205,7 +205,7 @@ Stream hosts allow you to forward TCP and/or UDP traffic through NPM. Perfect fo
 - `npm.stream.forward.port`: Target port to forward to
   - **Auto-detected if omitted**: Uses first exposed port from container's EXPOSE directive or -p port mappings
 - `npm.stream.forward.host`: Target host to forward to
-  - **Auto-detected if omitted**: Uses container name if on same network as NPM, otherwise uses Docker host IP
+  - **Auto-detected if omitted**: Same rules as `npm.proxy.host` (container IP when NPM is host-networked, else shared-network DNS / host IP)
 - `npm.stream.forward.tcp`: Enable TCP forwarding (`true`/`false`, default: `true`)
 - `npm.stream.forward.udp`: Enable UDP forwarding (`true`/`false`, default: `false`)
 - `npm.stream.ssl`: SSL certificate (can be certificate ID or domain name for auto-matching)
@@ -252,16 +252,21 @@ labels:
 
 When `NPM_CONTAINER_NAME` is configured, the service automatically detects:
 
-1. **Shared Network Scenario**: If your container is on the same Docker network as NPM
+1. **NPM host networking** (NPMplus / GoDoxy-style `network_mode: host`)
+   - Forward host is the container's Docker bridge IP (e.g. `172.18.0.5`)
+   - NPMplus shares the host network namespace, so it can reach that IP on the **container-internal** port — no `-p` / published ports required
+   - Host-networked targets use `127.0.0.1`
+
+2. **Shared Network Scenario**: If your container is on the same Docker bridge/overlay as NPM
    - Forward host is set to the container name (Docker DNS handles routing)
    - Example: Container `myapp` → `npm.proxy.host: myapp`
 
-2. **External Network Scenario**: If your container is NOT on the same network as NPM
-   - Forward host is set to the Docker host IP address
+3. **External Network Scenario**: If NPM is bridge-networked and the container is not on a shared network
+   - Forward host is set to the Docker host IP address (published ports required)
    - Docker host IP is detected from the bridge network gateway or uses `host.docker.internal`
    - Example: Container on different network → `npm.proxy.host: 172.17.0.1`
 
-3. **Manual Override**: You can always explicitly set `npm.proxy.host` to override auto-detection
+4. **Manual Override**: You can always explicitly set `npm.proxy.host` (or `proxy.hosts`) to override auto-detection
 
 ## Automatic SSL Certificate Selection
 
