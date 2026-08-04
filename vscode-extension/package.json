@@ -82,6 +82,12 @@
         "title": "Stop",
         "icon": "$(trash)",
         "category": "NPM Docker Sync"
+      },
+      {
+        "command": "npmDockerSync.extendTunnel",
+        "title": "Extend…",
+        "icon": "$(history)",
+        "category": "NPM Docker Sync"
       }
     ],
     "menus": {
@@ -99,19 +105,24 @@
       ],
       "view/item/context": [
         {
-          "command": "npmDockerSync.openTunnelUrl",
-          "when": "view == npmDockerSync.tunnelsView && viewItem == tunnel",
+          "command": "npmDockerSync.extendTunnel",
+          "when": "view == npmDockerSync.tunnelsView && viewItem =~ /^tunnel/",
           "group": "inline@1"
         },
         {
-          "command": "npmDockerSync.copyTunnelUrl",
-          "when": "view == npmDockerSync.tunnelsView && viewItem == tunnel",
+          "command": "npmDockerSync.openTunnelUrl",
+          "when": "view == npmDockerSync.tunnelsView && viewItem =~ /^tunnel/",
           "group": "inline@2"
         },
         {
-          "command": "npmDockerSync.stopTunnelItem",
-          "when": "view == npmDockerSync.tunnelsView && viewItem == tunnel",
+          "command": "npmDockerSync.copyTunnelUrl",
+          "when": "view == npmDockerSync.tunnelsView && viewItem =~ /^tunnel/",
           "group": "inline@3"
+        },
+        {
+          "command": "npmDockerSync.stopTunnelItem",
+          "when": "view == npmDockerSync.tunnelsView && viewItem =~ /^tunnel/",
+          "group": "inline@4"
         }
       ],
       "commandPalette": [
@@ -125,6 +136,10 @@
         },
         {
           "command": "npmDockerSync.stopTunnelItem",
+          "when": "false"
+        },
+        {
+          "command": "npmDockerSync.extendTunnel",
           "when": "false"
         }
       ]

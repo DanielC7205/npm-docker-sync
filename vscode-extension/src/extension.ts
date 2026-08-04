@@ -76,7 +76,62 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.window.showErrorMessage(`Stop failed: ${e instanceof Error ? e.message : String(e)}`);
       }
     }),
+    vscode.commands.registerCommand('npmDockerSync.extendTunnel', async (item?: TunnelItem) => {
+      if (!item?.tunnel.id) return;
+      const picks: (vscode.QuickPickItem & { minutes: number })[] = [
+        { label: '+30 minutes', description: 'Add to remaining time', minutes: 30 },
+        { label: '+1 hour', description: 'Add to remaining time', minutes: 60 },
+        { label: '+2 hours', description: 'Add to remaining time', minutes: 120 },
+        { label: '+4 hours', description: 'Add to remaining time', minutes: 240 },
+        { label: '+8 hours', description: 'Add to remaining time', minutes: 480 },
+        { label: '+24 hours', description: 'Add to remaining time', minutes: 1440 },
+        { label: 'Custom…', description: 'Add a custom number of minutes', minutes: -1 },
+      ];
+      const chosen = await vscode.window.showQuickPick(picks, {
+        placeHolder: `Extend ${item.tunnel.label || item.tunnel.url}`,
+      });
+      if (!chosen) return;
+
+      let ttl = chosen.minutes;
+      if (ttl < 0) {
+        const raw = await vscode.window.showInputBox({
+          prompt: 'Extend by how many minutes?',
+          value: '120',
+          validateInput: (v) => {
+            const n = Number(v);
+            if (!Number.isFinite(n) || n < 5) return 'Enter at least 5 minutes';
+            if (n > 60 * 24 * 7) return 'Max is 7 days (10080 minutes)';
+            return undefined;
+          },
+        });
+        if (!raw) return;
+        ttl = Number(raw);
+      }
+
+      try {
+        const updated = await api<{ id: string; url: string; expiresAt: string }>(
+          `/api/tunnels/${item.tunnel.id}/extend`,
+          { method: 'POST', body: JSON.stringify({ ttlMinutes: ttl }) },
+        );
+        if (activeTunnel?.id === item.tunnel.id) {
+          activeTunnel = { ...activeTunnel, expiresAt: updated.expiresAt, url: updated.url };
+          updateStatus(activeTunnel);
+        }
+        tunnelsProvider?.refresh();
+        vscode.window.showInformationMessage(
+          `Extended until ${new Date(updated.expiresAt).toLocaleString()}`,
+        );
+      } catch (e) {
+        vscode.window.showErrorMessage(`Extend failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }),
   );
+
+  // Keep expiry countdowns fresh while the panel is open
+  const tick = setInterval(() => {
+    if (treeView.visible) tunnelsProvider?.refresh();
+  }, 30_000);
+  context.subscriptions.push({ dispose: () => clearInterval(tick) });
 }
 
 export async function deactivate() {
@@ -529,8 +584,10 @@ async function listTunnels() {
 
 function updateStatus(tunnel: TunnelResponse) {
   if (!statusBar) return;
+  const end = new Date(tunnel.expiresAt);
+  const mins = Math.max(0, Math.round((end.getTime() - Date.now()) / 60_000));
   statusBar.text = `$(globe) ${tunnel.url}`;
-  statusBar.tooltip = `Expires ${new Date(tunnel.expiresAt).toLocaleString()}`;
+  statusBar.tooltip = `Expires ${end.toLocaleString()} (${mins}m left)`;
   statusBar.show();
 }
 

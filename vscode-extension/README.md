@@ -34,7 +34,7 @@ The extension adds an **NPM Tunnels** tab in the bottom panel (next to Terminal 
 
 - **+** share a local port
 - **Refresh** reload tunnels from the API
-- Per row: open in browser, copy URL, stop
+- Per row: **extend** (+time), open, copy URL, stop — expiry shows as `2h 15m left` (warns under 15m)
 
 If you don’t see it: **View → Appearance → Panel**, then look for the NPM Tunnels icon in the panel header (or Command Palette → “NPM Tunnels: Focus on Tunnels View”).
 

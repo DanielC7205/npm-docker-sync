@@ -182,8 +182,15 @@ public class TunnelService
         var tunnel = _settings.GetTunnel(id)
             ?? throw new InvalidOperationException("Tunnel not found");
 
-        var ttl = ttlMinutes ?? _settings.GetInt("TUNNEL_DEFAULT_TTL_MINUTES", 120);
-        tunnel.ExpiresAt = DateTime.UtcNow.AddMinutes(Math.Clamp(ttl, 5, 60 * 24 * 7));
+        var addMinutes = ttlMinutes ?? _settings.GetInt("TUNNEL_DEFAULT_TTL_MINUTES", 120);
+        addMinutes = Math.Clamp(addMinutes, 5, 60 * 24 * 7);
+
+        var baseline = tunnel.ExpiresAt > DateTime.UtcNow ? tunnel.ExpiresAt : DateTime.UtcNow;
+        var maxExpiry = DateTime.UtcNow.AddDays(7);
+        tunnel.ExpiresAt = baseline.AddMinutes(addMinutes);
+        if (tunnel.ExpiresAt > maxExpiry)
+            tunnel.ExpiresAt = maxExpiry;
+
         _settings.UpdateTunnel(tunnel);
         return tunnel;
     }
