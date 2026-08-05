@@ -43,12 +43,15 @@ public class ProxyLocationRequest
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? ForwardPath { get; set; }
 
+    [JsonIgnore]
     [JsonPropertyName("advanced_config")]
     public string AdvancedConfig { get; set; } = string.Empty;
 
+    [JsonIgnore]
     [JsonPropertyName("npmplus_access_list_ids")]
     public List<int> NpmplusAccessListIds { get; set; } = new();
 
+    [JsonIgnore]
     [JsonPropertyName("npmplus_access_list_type")]
     public string NpmplusAccessListType { get; set; } = "public";
 }
