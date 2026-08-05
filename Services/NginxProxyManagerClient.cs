@@ -285,6 +285,7 @@ public class NginxProxyManagerClient
     public async Task<ProxyHost> CreateProxyHostAsync(ProxyHostRequest request, CancellationToken cancellationToken)
     {
         await EnsureAuthenticated(cancellationToken);
+        NormalizeLocationsForNpmplus(request);
 
         _logger.LogInformation("Creating proxy host for domains: {Domains}", string.Join(", ", request.DomainNames));
 
@@ -309,6 +310,7 @@ public class NginxProxyManagerClient
     public async Task<ProxyHost> UpdateProxyHostAsync(int hostId, ProxyHostRequest request, CancellationToken cancellationToken)
     {
         await EnsureAuthenticated(cancellationToken);
+        NormalizeLocationsForNpmplus(request);
 
         _logger.LogInformation("Updating proxy host {HostId} for domains: {Domains}",
             hostId, string.Join(", ", request.DomainNames));
@@ -329,6 +331,20 @@ public class NginxProxyManagerClient
             PropertyNameCaseInsensitive = true
         });
         return result ?? throw new Exception("Failed to update proxy host");
+    }
+
+    /// <summary>
+    /// NPMplus location schema requires npmplus_access_list_* and rejects unknown props (e.g. forward_path).
+    /// </summary>
+    private static void NormalizeLocationsForNpmplus(ProxyHostRequest request)
+    {
+        foreach (var loc in request.Locations)
+        {
+            loc.NpmplusAccessListIds ??= new List<int>();
+            if (string.IsNullOrWhiteSpace(loc.NpmplusAccessListType))
+                loc.NpmplusAccessListType = "public";
+            loc.AdvancedConfig ??= string.Empty;
+        }
     }
 
     public async Task DeleteProxyHostAsync(int hostId, CancellationToken cancellationToken)

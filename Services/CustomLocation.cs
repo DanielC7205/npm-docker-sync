@@ -39,21 +39,21 @@ public class ProxyLocationRequest
     [JsonPropertyName("forward_port")]
     public int ForwardPort { get; set; }
 
-    [JsonPropertyName("forward_path")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    /// <summary>
+    /// Classic NPM path rewrite. NPMplus location schema uses additionalProperties:false
+    /// and does not allow forward_path, so this is never serialized on the wire.
+    /// </summary>
+    [JsonIgnore]
     public string? ForwardPath { get; set; }
 
-    [JsonIgnore]
-    [JsonPropertyName("advanced_config")]
-    public string AdvancedConfig { get; set; } = string.Empty;
-
-    [JsonIgnore]
     [JsonPropertyName("npmplus_access_list_ids")]
-    public List<int> NpmplusAccessListIds { get; set; } = new();
+    public List<int>? NpmplusAccessListIds { get; set; } = new();
 
-    [JsonIgnore]
     [JsonPropertyName("npmplus_access_list_type")]
-    public string NpmplusAccessListType { get; set; } = "public";
+    public string? NpmplusAccessListType { get; set; } = "public";
+
+    [JsonPropertyName("advanced_config")]
+    public string? AdvancedConfig { get; set; } = string.Empty;
 }
 
 public class HostCandidate
