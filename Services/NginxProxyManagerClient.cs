@@ -335,16 +335,12 @@ public class NginxProxyManagerClient
 
     /// <summary>
     /// NPMplus location schema requires npmplus_access_list_* and rejects unknown props (e.g. forward_path).
+    /// Defaults match the Proxy Hosts web UI PUT payload.
     /// </summary>
     private static void NormalizeLocationsForNpmplus(ProxyHostRequest request)
     {
         foreach (var loc in request.Locations)
-        {
-            loc.NpmplusAccessListIds ??= new List<int>();
-            if (string.IsNullOrWhiteSpace(loc.NpmplusAccessListType))
-                loc.NpmplusAccessListType = "public";
-            loc.AdvancedConfig ??= string.Empty;
-        }
+            loc.EnsureNpmplusDefaults();
     }
 
     public async Task DeleteProxyHostAsync(int hostId, CancellationToken cancellationToken)
@@ -393,6 +389,19 @@ public class NginxProxyManagerClient
             Enabled = enabled,
             NpmplusAuthRequest = existing.NpmplusAuthRequest ?? "none",
             NpmplusAuthRequestUpstream = existing.NpmplusAuthRequestUpstream ?? string.Empty,
+            NpmplusHttp3Support = existing.NpmplusHttp3Support != 0,
+            TrustForwardedProto = existing.TrustForwardedProto != 0,
+            NpmplusLocationConfig = existing.NpmplusLocationConfig ?? string.Empty,
+            NpmplusNoindex = existing.NpmplusNoindex != 0,
+            NpmplusCrowdsecAppsec = existing.NpmplusCrowdsecAppsec != 0,
+            NpmplusProxyResponseBuffering = existing.NpmplusProxyResponseBuffering != 0,
+            NpmplusProxyRequestBuffering = existing.NpmplusProxyRequestBuffering != 0,
+            NpmplusDisableUriSanitisation = existing.NpmplusDisableUriSanitisation != 0,
+            NpmplusUpstreamCompression = existing.NpmplusUpstreamCompression != 0,
+            NpmplusFancyindex = existing.NpmplusFancyindex != 0,
+            NpmplusXFrameOptions = string.IsNullOrWhiteSpace(existing.NpmplusXFrameOptions)
+                ? "SAMEORIGIN"
+                : existing.NpmplusXFrameOptions,
             Meta = meta,
             Locations = existing.Locations ?? new List<ProxyLocationRequest>(),
         };
@@ -681,6 +690,48 @@ public class ProxyHost
     [JsonPropertyName("npmplus_auth_request_upstream")]
     public string? NpmplusAuthRequestUpstream { get; set; }
 
+    [JsonPropertyName("npmplus_http3_support")]
+    [JsonConverter(typeof(BoolToIntConverter))]
+    public int NpmplusHttp3Support { get; set; }
+
+    [JsonPropertyName("trust_forwarded_proto")]
+    [JsonConverter(typeof(BoolToIntConverter))]
+    public int TrustForwardedProto { get; set; }
+
+    [JsonPropertyName("npmplus_location_config")]
+    public string? NpmplusLocationConfig { get; set; }
+
+    [JsonPropertyName("npmplus_noindex")]
+    [JsonConverter(typeof(BoolToIntConverter))]
+    public int NpmplusNoindex { get; set; }
+
+    [JsonPropertyName("npmplus_crowdsec_appsec")]
+    [JsonConverter(typeof(BoolToIntConverter))]
+    public int NpmplusCrowdsecAppsec { get; set; }
+
+    [JsonPropertyName("npmplus_proxy_response_buffering")]
+    [JsonConverter(typeof(BoolToIntConverter))]
+    public int NpmplusProxyResponseBuffering { get; set; }
+
+    [JsonPropertyName("npmplus_proxy_request_buffering")]
+    [JsonConverter(typeof(BoolToIntConverter))]
+    public int NpmplusProxyRequestBuffering { get; set; }
+
+    [JsonPropertyName("npmplus_disable_uri_sanitisation")]
+    [JsonConverter(typeof(BoolToIntConverter))]
+    public int NpmplusDisableUriSanitisation { get; set; }
+
+    [JsonPropertyName("npmplus_upstream_compression")]
+    [JsonConverter(typeof(BoolToIntConverter))]
+    public int NpmplusUpstreamCompression { get; set; }
+
+    [JsonPropertyName("npmplus_fancyindex")]
+    [JsonConverter(typeof(BoolToIntConverter))]
+    public int NpmplusFancyindex { get; set; }
+
+    [JsonPropertyName("npmplus_x_frame_options")]
+    public string? NpmplusXFrameOptions { get; set; }
+
     [JsonPropertyName("locations")]
     public List<ProxyLocationRequest>? Locations { get; set; }
 }
@@ -749,6 +800,39 @@ public class ProxyHostRequest
 
     [JsonPropertyName("npmplus_auth_request_upstream")]
     public string NpmplusAuthRequestUpstream { get; set; } = string.Empty;
+
+    [JsonPropertyName("npmplus_http3_support")]
+    public bool NpmplusHttp3Support { get; set; }
+
+    [JsonPropertyName("trust_forwarded_proto")]
+    public bool TrustForwardedProto { get; set; }
+
+    [JsonPropertyName("npmplus_location_config")]
+    public string NpmplusLocationConfig { get; set; } = string.Empty;
+
+    [JsonPropertyName("npmplus_noindex")]
+    public bool NpmplusNoindex { get; set; }
+
+    [JsonPropertyName("npmplus_crowdsec_appsec")]
+    public bool NpmplusCrowdsecAppsec { get; set; }
+
+    [JsonPropertyName("npmplus_proxy_response_buffering")]
+    public bool NpmplusProxyResponseBuffering { get; set; }
+
+    [JsonPropertyName("npmplus_proxy_request_buffering")]
+    public bool NpmplusProxyRequestBuffering { get; set; }
+
+    [JsonPropertyName("npmplus_disable_uri_sanitisation")]
+    public bool NpmplusDisableUriSanitisation { get; set; }
+
+    [JsonPropertyName("npmplus_upstream_compression")]
+    public bool NpmplusUpstreamCompression { get; set; }
+
+    [JsonPropertyName("npmplus_fancyindex")]
+    public bool NpmplusFancyindex { get; set; }
+
+    [JsonPropertyName("npmplus_x_frame_options")]
+    public string NpmplusXFrameOptions { get; set; } = "SAMEORIGIN";
 
     [JsonPropertyName("locations")]
     public List<ProxyLocationRequest> Locations { get; set; } = new();

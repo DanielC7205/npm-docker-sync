@@ -127,6 +127,19 @@ public class UnavailableFallbackService
             Enabled = true,
             NpmplusAuthRequest = "none",
             NpmplusAuthRequestUpstream = string.Empty,
+            NpmplusHttp3Support = existing.NpmplusHttp3Support != 0,
+            TrustForwardedProto = existing.TrustForwardedProto != 0,
+            NpmplusLocationConfig = existing.NpmplusLocationConfig ?? string.Empty,
+            NpmplusNoindex = existing.NpmplusNoindex != 0,
+            NpmplusCrowdsecAppsec = existing.NpmplusCrowdsecAppsec != 0,
+            NpmplusProxyResponseBuffering = existing.NpmplusProxyResponseBuffering != 0,
+            NpmplusProxyRequestBuffering = existing.NpmplusProxyRequestBuffering != 0,
+            NpmplusDisableUriSanitisation = existing.NpmplusDisableUriSanitisation != 0,
+            NpmplusUpstreamCompression = existing.NpmplusUpstreamCompression != 0,
+            NpmplusFancyindex = existing.NpmplusFancyindex != 0,
+            NpmplusXFrameOptions = string.IsNullOrWhiteSpace(existing.NpmplusXFrameOptions)
+                ? "SAMEORIGIN"
+                : existing.NpmplusXFrameOptions,
             Meta = meta,
             Locations = existing.Locations ?? new List<ProxyLocationRequest>(),
         };
@@ -202,6 +215,19 @@ public class UnavailableFallbackService
             Enabled = true,
             NpmplusAuthRequest = existing.NpmplusAuthRequest ?? "none",
             NpmplusAuthRequestUpstream = existing.NpmplusAuthRequestUpstream ?? string.Empty,
+            NpmplusHttp3Support = existing.NpmplusHttp3Support != 0,
+            TrustForwardedProto = existing.TrustForwardedProto != 0,
+            NpmplusLocationConfig = existing.NpmplusLocationConfig ?? string.Empty,
+            NpmplusNoindex = existing.NpmplusNoindex != 0,
+            NpmplusCrowdsecAppsec = existing.NpmplusCrowdsecAppsec != 0,
+            NpmplusProxyResponseBuffering = existing.NpmplusProxyResponseBuffering != 0,
+            NpmplusProxyRequestBuffering = existing.NpmplusProxyRequestBuffering != 0,
+            NpmplusDisableUriSanitisation = existing.NpmplusDisableUriSanitisation != 0,
+            NpmplusUpstreamCompression = existing.NpmplusUpstreamCompression != 0,
+            NpmplusFancyindex = existing.NpmplusFancyindex != 0,
+            NpmplusXFrameOptions = string.IsNullOrWhiteSpace(existing.NpmplusXFrameOptions)
+                ? "SAMEORIGIN"
+                : existing.NpmplusXFrameOptions,
             Meta = meta,
             Locations = locations ?? existing.Locations ?? new List<ProxyLocationRequest>(),
         };

@@ -95,6 +95,10 @@ public class TunnelService
             Enabled = true,
             NpmplusAuthRequest = string.IsNullOrWhiteSpace(authRequest) ? "none" : authRequest,
             NpmplusAuthRequestUpstream = authUpstream,
+            NpmplusHttp3Support = false,
+            TrustForwardedProto = false,
+            NpmplusLocationConfig = string.Empty,
+            NpmplusXFrameOptions = "SAMEORIGIN",
             Locations = LabelParser.ToProxyLocationRequests(locations),
             Meta = new Dictionary<string, object>
             {
@@ -179,6 +183,19 @@ public class TunnelService
             AdvancedConfig = string.Empty,
             NpmplusAuthRequest = existing.NpmplusAuthRequest ?? "none",
             NpmplusAuthRequestUpstream = existing.NpmplusAuthRequestUpstream ?? string.Empty,
+            NpmplusHttp3Support = existing.NpmplusHttp3Support != 0,
+            TrustForwardedProto = existing.TrustForwardedProto != 0,
+            NpmplusLocationConfig = existing.NpmplusLocationConfig ?? string.Empty,
+            NpmplusNoindex = existing.NpmplusNoindex != 0,
+            NpmplusCrowdsecAppsec = existing.NpmplusCrowdsecAppsec != 0,
+            NpmplusProxyResponseBuffering = existing.NpmplusProxyResponseBuffering != 0,
+            NpmplusProxyRequestBuffering = existing.NpmplusProxyRequestBuffering != 0,
+            NpmplusDisableUriSanitisation = existing.NpmplusDisableUriSanitisation != 0,
+            NpmplusUpstreamCompression = existing.NpmplusUpstreamCompression != 0,
+            NpmplusFancyindex = existing.NpmplusFancyindex != 0,
+            NpmplusXFrameOptions = string.IsNullOrWhiteSpace(existing.NpmplusXFrameOptions)
+                ? "SAMEORIGIN"
+                : existing.NpmplusXFrameOptions,
             Locations = locations != null
                 ? LabelParser.ToProxyLocationRequests(locations)
                 : (existing.Locations ?? new List<ProxyLocationRequest>()),

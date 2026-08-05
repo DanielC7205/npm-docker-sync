@@ -650,6 +650,17 @@ public class LabelParser
             Enabled = !uiDisabled,
             NpmplusAuthRequest = string.IsNullOrWhiteSpace(config.AuthRequest) ? "none" : config.AuthRequest,
             NpmplusAuthRequestUpstream = config.AuthRequestUpstream ?? string.Empty,
+            NpmplusHttp3Support = false,
+            TrustForwardedProto = false,
+            NpmplusLocationConfig = string.Empty,
+            NpmplusNoindex = false,
+            NpmplusCrowdsecAppsec = false,
+            NpmplusProxyResponseBuffering = false,
+            NpmplusProxyRequestBuffering = false,
+            NpmplusDisableUriSanitisation = false,
+            NpmplusUpstreamCompression = false,
+            NpmplusFancyindex = false,
+            NpmplusXFrameOptions = "SAMEORIGIN",
             Meta = meta,
             Locations = ToProxyLocationRequests(config.Locations),
         };
@@ -660,16 +671,12 @@ public class LabelParser
         if (locations == null || locations.Count == 0)
             return new List<ProxyLocationRequest>();
 
-        return locations.Select(loc => new ProxyLocationRequest
-        {
-            Path = string.IsNullOrWhiteSpace(loc.Path) ? "/" : loc.Path.Trim(),
-            ForwardScheme = string.IsNullOrWhiteSpace(loc.ForwardScheme) ? "http" : loc.ForwardScheme.Trim().ToLowerInvariant(),
-            ForwardHost = loc.ForwardHost?.Trim() ?? string.Empty,
-            ForwardPort = loc.ForwardPort ?? 0,
-            ForwardPath = string.IsNullOrWhiteSpace(loc.ForwardPath) ? null : loc.ForwardPath.Trim(),
-            NpmplusAccessListIds = new List<int>(),
-            NpmplusAccessListType = "public",
-        }).ToList();
+        return locations.Select(loc => ProxyLocationRequest.Create(
+            loc.Path,
+            loc.ForwardScheme ?? "http",
+            loc.ForwardHost ?? string.Empty,
+            loc.ForwardPort ?? 0,
+            loc.ForwardPath)).ToList();
     }
 
     public StreamRequest ToStreamRequest(StreamConfiguration config, string containerId, string syncInstanceId, string npmUrl)
