@@ -49,6 +49,8 @@ Monitor 🐳 Docker containers and automatically synchronize proxy configuration
   - Used when containers aren't on the same network as NPM
   - If not set, will try `host.docker.internal` or Docker bridge gateway
 - `WEB_UI_PORT`: Port for the embedded web UI (default: `8080`)
+- `WEB_UI_PUBLIC_URL`: Full public URL for the dashboard (e.g. `https://npmsync.example.com`). Used for OIDC redirect URIs when the UI is behind NPM.
+- `WEB_UI_DOMAIN`: Shorthand hostname (`npmsync` or `npmsync.example.com`). Expands with `PROXY_BASE_DOMAIN` when no dot is present. Ignored when `WEB_UI_PUBLIC_URL` is set.
 - `WEB_UI_TOKEN`: Optional bearer token required for `/api/*` (except `/api/health`). When empty, the API is open. **Required to save settings from the UI.**
 - `SQLITE_PATH`: SQLite database path (default: `/data/npm-docker-sync.db`). Mount a volume on `/data`.
 - `NPM_TLS_SKIP_VERIFY`: Skip TLS certificate validation for NPM API calls (`true`/`false`, default: `false`). Useful for NPMplus self-signed HTTPS or HTTP→HTTPS redirects.

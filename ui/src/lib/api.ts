@@ -132,7 +132,12 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const fetchAuthStatus = () => api<AuthStatus>('/api/auth/status')
 export const fetchStats = () => api<DashboardStats>('/api/stats')
-export const fetchRoutes = () => api<RouteInfo[]>('/api/routes')
+export const fetchDashboard = () =>
+  api<{ stats: DashboardStats; routes: RouteInfo[] }>('/api/dashboard')
+export const fetchRoutes = (details = false) =>
+  api<RouteInfo[]>(details ? '/api/routes?details=true' : '/api/routes')
+export const fetchRouteDetail = (containerId: string, index: number) =>
+  api<RouteInfo>(`/api/routes/${encodeURIComponent(containerId)}/${index}`)
 export const fetchCertificates = () => api<CertificateInfo[]>('/api/certificates')
 export const fetchSettings = () => api<AppSettings>('/api/settings')
 export const saveSettings = (body: Record<string, string | null>) =>

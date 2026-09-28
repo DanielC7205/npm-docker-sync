@@ -42,6 +42,11 @@ public class SyncOrchestrator
     // Last known container display names
     private readonly ConcurrentDictionary<string, string> _containerNames = new();
 
+    private readonly object _routesCacheLock = new();
+    private List<RouteInfo>? _routesListCache;
+    private DateTime _routesListCacheExpiry = DateTime.MinValue;
+    private static readonly TimeSpan RoutesListCacheTtl = TimeSpan.FromSeconds(4);
+
     public SyncOrchestrator(
         ILogger<SyncOrchestrator> logger,
         NginxProxyManagerClient npmClient,
@@ -170,6 +175,7 @@ public class SyncOrchestrator
         {
             await EnsureInstanceIdAsync(cancellationToken);
 
+            _settings.RebindRouteOverrides(containerId, containerName);
             _containerNames[containerId] = containerName;
 
             if (MatchesNeverBridgeKeywords(containerName, null))
@@ -216,12 +222,18 @@ public class SyncOrchestrator
                         containerName,
                         _containerProxyMap.Keys.Count(k => k.StartsWith($"{containerId}:")),
                         _containerStreamMap.Keys.Count(k => k.StartsWith($"{containerId}:")));
+                    return;
                 }
-                else
+
+                var needsOverrideSync = proxyConfigs.Keys.Any(idx =>
+                    _settings.GetRouteOverride(containerId, containerName, idx) != null);
+                if (!needsOverrideSync)
                 {
                     _logger.LogDebug("Labels unchanged for container {ContainerName}, skipping", containerName);
+                    return;
                 }
-                return;
+
+                _logger.LogInformation("Re-syncing container {ContainerName} — UI overrides need NPM sync", containerName);
             }
 
             if (previousHash != null && previousHash != currentLabelHash)
@@ -253,10 +265,20 @@ public class SyncOrchestrator
 
             _containerLabelHashes.AddOrUpdate(containerId, currentLabelHash, (_, _) => currentLabelHash);
             _mirrorSyncService?.RequestSync();
+            InvalidateRoutesCache();
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error processing container {ContainerId}", containerId);
+        }
+    }
+
+    private void InvalidateRoutesCache()
+    {
+        lock (_routesCacheLock)
+        {
+            _routesListCache = null;
+            _routesListCacheExpiry = DateTime.MinValue;
         }
     }
 
@@ -420,7 +442,44 @@ public class SyncOrchestrator
         _logger.LogInformation("Proxy {ProxyKey} (host {HostId}) set enabled={Enabled}", proxyKey, hostId, enabled);
     }
 
-    public async Task<List<RouteInfo>> GetRoutesAsync(CancellationToken cancellationToken)
+    public async Task<(DashboardStats Stats, List<RouteInfo> Routes)> GetDashboardAsync(CancellationToken cancellationToken)
+    {
+        var routes = await GetRoutesAsync(cancellationToken, includeDetails: false);
+        return (ComputeStats(routes), routes);
+    }
+
+    public async Task<RouteInfo?> GetRouteDetailAsync(string containerId, int index, CancellationToken cancellationToken) =>
+        (await BuildRoutesAsync(cancellationToken, includeDetails: true, containerId, index)).FirstOrDefault();
+
+    public async Task<List<RouteInfo>> GetRoutesAsync(CancellationToken cancellationToken, bool includeDetails = false)
+    {
+        if (!includeDetails)
+        {
+            lock (_routesCacheLock)
+            {
+                if (_routesListCache != null && DateTime.UtcNow < _routesListCacheExpiry)
+                    return _routesListCache;
+            }
+        }
+
+        var routes = await BuildRoutesAsync(cancellationToken, includeDetails, filterContainerId: null, filterIndex: null);
+        if (!includeDetails)
+        {
+            lock (_routesCacheLock)
+            {
+                _routesListCache = routes;
+                _routesListCacheExpiry = DateTime.UtcNow.Add(RoutesListCacheTtl);
+            }
+        }
+
+        return routes;
+    }
+
+    private async Task<List<RouteInfo>> BuildRoutesAsync(
+        CancellationToken cancellationToken,
+        bool includeDetails,
+        string? filterContainerId,
+        int? filterIndex)
     {
         await EnsureInstanceIdAsync(cancellationToken);
 
@@ -442,6 +501,9 @@ public class SyncOrchestrator
         foreach (var container in containers)
         {
             var containerId = container.ID;
+            if (filterContainerId != null && !containerId.Equals(filterContainerId, StringComparison.OrdinalIgnoreCase))
+                continue;
+
             var containerName = container.Names.FirstOrDefault()?.TrimStart('/') ?? containerId[..12];
             var labels = container.Labels ?? new Dictionary<string, string>();
 
@@ -493,6 +555,9 @@ public class SyncOrchestrator
 
             foreach (var (index, config) in configs)
             {
+                if (filterIndex.HasValue && index != filterIndex.Value)
+                    continue;
+
                 if (config.Homepage?.Show == false)
                     continue;
 
@@ -511,9 +576,9 @@ public class SyncOrchestrator
                 var uiDisabled = _uiDisabledProxies.ContainsKey(proxyKey) ||
                                  (npmHost != null && NginxProxyManagerClient.IsUiDisabled(npmHost));
 
-                var routeOverride = _settings.GetRouteOverride(containerId, index);
+                var routeOverride = _settings.GetRouteOverride(containerId, containerName, index);
                 if (routeOverride != null)
-                    ApplyRouteOverride(containerId, index, config);
+                    ApplyRouteOverride(containerId, containerName, index, config);
 
                 ApplyDefaultAuthRequest(config);
 
@@ -527,46 +592,64 @@ public class SyncOrchestrator
                     ? config.ForwardScheme
                     : (npmHost?.ForwardScheme ?? "http");
 
-                if (string.IsNullOrWhiteSpace(forwardHost))
+                if (includeDetails)
                 {
-                    try
+                    if (string.IsNullOrWhiteSpace(forwardHost))
                     {
-                        forwardHost = await _networkService.InferForwardHost(
-                            containerId, null, cancellationToken, config.PreferredNetwork);
+                        try
+                        {
+                            forwardHost = await _networkService.InferForwardHost(
+                                containerId, null, cancellationToken, config.PreferredNetwork);
+                        }
+                        catch
+                        {
+                            // leave empty for UI
+                        }
                     }
-                    catch
+
+                    if (!forwardPort.HasValue)
                     {
-                        // leave empty for UI
+                        try
+                        {
+                            forwardPort = await _networkService.InferForwardPort(containerId, cancellationToken);
+                        }
+                        catch
+                        {
+                            // leave empty for UI
+                        }
                     }
                 }
 
-                if (!forwardPort.HasValue)
+                string? icon;
+                if (includeDetails)
                 {
-                    try
-                    {
-                        forwardPort = await _networkService.InferForwardPort(containerId, cancellationToken);
-                    }
-                    catch
-                    {
-                        // leave empty for UI
-                    }
+                    icon = await _iconResolver.ResolveAsync(
+                        routeOverride?.Icon,
+                        config.Homepage?.Icon,
+                        config.Homepage?.Name,
+                        containerName,
+                        cancellationToken);
                 }
-
-                var icon = await _iconResolver.ResolveAsync(
-                    routeOverride?.Icon,
-                    config.Homepage?.Icon,
-                    config.Homepage?.Name,
-                    containerName,
-                    cancellationToken);
+                else
+                {
+                    icon = _iconResolver.GuessIconUrl(
+                        routeOverride?.Icon,
+                        config.Homepage?.Icon,
+                        config.Homepage?.Name,
+                        containerName);
+                }
 
                 KomodoMatch? komodo = null;
-                try
+                if (includeDetails)
                 {
-                    komodo = await _komodoClient.FindResourceForContainerAsync(containerName, cancellationToken);
-                }
-                catch
-                {
-                    // ignored
+                    try
+                    {
+                        komodo = await _komodoClient.FindResourceForContainerAsync(containerName, cancellationToken);
+                    }
+                    catch
+                    {
+                        // ignored
+                    }
                 }
 
                 routes.Add(new RouteInfo
@@ -602,8 +685,12 @@ public class SyncOrchestrator
                     AuthExempt = routeOverride?.AuthExempt,
                     Hidden = routeOverride?.Hidden == true,
                     HasUiOverride = routeOverride != null,
-                    CandidatePorts = await _networkService.ListCandidatePortsAsync(containerId, cancellationToken),
-                    CandidateHosts = await _networkService.ListCandidateHostsAsync(containerId, cancellationToken),
+                    CandidatePorts = includeDetails
+                        ? await _networkService.ListCandidatePortsAsync(containerId, cancellationToken)
+                        : new List<int>(),
+                    CandidateHosts = includeDetails
+                        ? await _networkService.ListCandidateHostsAsync(containerId, cancellationToken)
+                        : new List<HostCandidate>(),
                     Locations = config.Locations,
                     KomodoUrl = komodo?.Url,
                     KomodoResourceType = komodo?.ResourceType,
@@ -615,10 +702,9 @@ public class SyncOrchestrator
         return routes.OrderBy(r => r.Name, StringComparer.OrdinalIgnoreCase).ToList();
     }
 
-    public async Task<DashboardStats> GetStatsAsync(CancellationToken cancellationToken)
+    private DashboardStats ComputeStats(List<RouteInfo> routes)
     {
-        var routes = await GetRoutesAsync(cancellationToken);
-        var visible = routes.Where(r => !r.Hidden).ToList();
+        var visible = routes.Where(r => !r.Hidden && r.Status != RouteStatus.Disabled).ToList();
         var uptime = DateTime.UtcNow - _startedAt;
 
         return new DashboardStats
@@ -627,9 +713,15 @@ public class SyncOrchestrator
             Total = visible.Count(r => r.Status != RouteStatus.Excluded),
             Synced = visible.Count(r => r.Status == RouteStatus.Synced),
             Missing = visible.Count(r => r.Status == RouteStatus.Missing),
-            Disabled = visible.Count(r => r.Status == RouteStatus.Disabled),
+            Disabled = routes.Count(r => !r.Hidden && r.Status == RouteStatus.Disabled),
             Conflict = visible.Count(r => r.Status == RouteStatus.Conflict),
         };
+    }
+
+    public async Task<DashboardStats> GetStatsAsync(CancellationToken cancellationToken)
+    {
+        var routes = await GetRoutesAsync(cancellationToken, includeDetails: false);
+        return ComputeStats(routes);
     }
 
     private RouteStatus ResolveStatus(string proxyKey, ProxyConfiguration config, ProxyHost? npmHost)
@@ -697,7 +789,7 @@ public class SyncOrchestrator
 
     private async Task ProcessProxyConfig(string containerId, string containerName, int index, ProxyConfiguration config, CancellationToken cancellationToken)
     {
-        ApplyRouteOverride(containerId, index, config);
+        ApplyRouteOverride(containerId, containerName, index, config);
         ApplyDefaultAuthRequest(config);
         await ResolveLinkedLocationsAsync(config, cancellationToken);
 
@@ -882,6 +974,7 @@ public class SyncOrchestrator
             _lastProxyConfigs.TryRemove(containerId, out _);
             _containerNames.TryRemove(containerId, out _);
             _mirrorSyncService?.RequestSync();
+            InvalidateRoutesCache();
         }
         catch (Exception ex)
         {
@@ -1105,7 +1198,8 @@ public class SyncOrchestrator
             {
                 // Best-effort: use route override + inferred host for linked container
                 linked = new ProxyConfiguration { Index = linkedIndex };
-                ApplyRouteOverride(loc.LinkedContainerId, linkedIndex, linked);
+                var linkedName = _containerNames.GetValueOrDefault(loc.LinkedContainerId);
+                ApplyRouteOverride(loc.LinkedContainerId, linkedName, linkedIndex, linked);
             }
 
             var host = linked.ForwardHost;
@@ -1194,25 +1288,43 @@ public class SyncOrchestrator
 
     public async Task UpdateRouteOverrideAsync(string containerId, int index, RouteOverride patch, CancellationToken cancellationToken)
     {
-        var existing = _settings.GetRouteOverride(containerId, index) ?? new RouteOverride();
+        var container = await _dockerClient.Containers.InspectContainerAsync(containerId, cancellationToken);
+        var containerName = container.Name.TrimStart('/');
+        var existing = _settings.GetRouteOverride(containerId, containerName, index) ?? new RouteOverride();
         MergeOverride(existing, patch);
-        _settings.UpsertRouteOverride(containerId, index, existing);
+        _settings.UpsertRouteOverride(containerId, containerName, index, existing);
 
         // Force re-sync so NPM picks up changes
         _containerLabelHashes.TryRemove(containerId, out _);
+        InvalidateRoutesCache();
         await SyncNowAsync(containerId, cancellationToken);
     }
 
     public async Task ClearRouteOverrideAsync(string containerId, int index, CancellationToken cancellationToken)
     {
-        _settings.DeleteRouteOverride(containerId, index);
+        var containerName = _containerNames.GetValueOrDefault(containerId);
+        if (string.IsNullOrEmpty(containerName))
+        {
+            try
+            {
+                var container = await _dockerClient.Containers.InspectContainerAsync(containerId, cancellationToken);
+                containerName = container.Name.TrimStart('/');
+            }
+            catch
+            {
+                // best-effort
+            }
+        }
+
+        _settings.DeleteRouteOverride(containerId, containerName, index);
         _containerLabelHashes.TryRemove(containerId, out _);
+        InvalidateRoutesCache();
         await SyncNowAsync(containerId, cancellationToken);
     }
 
-    private void ApplyRouteOverride(string containerId, int index, ProxyConfiguration config)
+    private void ApplyRouteOverride(string containerId, string? containerName, int index, ProxyConfiguration config)
     {
-        var ov = _settings.GetRouteOverride(containerId, index);
+        var ov = _settings.GetRouteOverride(containerId, containerName, index);
         if (ov == null)
             return;
 

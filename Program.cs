@@ -113,6 +113,17 @@ var authBuilder = builder.Services.AddAuthentication(options =>
             options.GetClaimsFromUserInfoEndpoint = true;
             options.CallbackPath = builder.Configuration["OIDC_CALLBACK_PATH"] ?? "/signin-oidc";
             options.SignInScheme = CookieAuthenticationDefaults.AuthenticationScheme;
+            options.Events = new OpenIdConnectEvents
+            {
+                OnRedirectToIdentityProvider = ctx =>
+                {
+                    var store = ctx.HttpContext.RequestServices.GetRequiredService<SettingsStore>();
+                    var publicBase = store.GetWebUiPublicBaseUrl();
+                    if (!string.IsNullOrWhiteSpace(publicBase))
+                        ctx.ProtocolMessage.RedirectUri = $"{publicBase.TrimEnd('/')}{options.CallbackPath}";
+                    return Task.CompletedTask;
+                },
+            };
             var scopes = (builder.Configuration["OIDC_SCOPES"] ?? "openid profile email")
                 .Split(' ', StringSplitOptions.RemoveEmptyEntries);
             options.Scope.Clear();
@@ -236,11 +247,42 @@ app.MapGet("/api/stats", async (SyncOrchestrator orchestrator, CancellationToken
     }
 });
 
-app.MapGet("/api/routes", async (SyncOrchestrator orchestrator, CancellationToken ct) =>
+app.MapGet("/api/dashboard", async (SyncOrchestrator orchestrator, CancellationToken ct) =>
 {
     try
     {
-        return Results.Ok(await orchestrator.GetRoutesAsync(ct));
+        var (stats, routes) = await orchestrator.GetDashboardAsync(ct);
+        return Results.Ok(new { stats, routes });
+    }
+    catch (Exception ex)
+    {
+        return Results.Json(new { error = ex.Message }, statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+});
+
+app.MapGet("/api/routes", async (SyncOrchestrator orchestrator, HttpContext ctx, CancellationToken ct) =>
+{
+    try
+    {
+        var details = ctx.Request.Query.TryGetValue("details", out var d) &&
+                      (d == "1" || d == "true");
+        return Results.Ok(await orchestrator.GetRoutesAsync(ct, includeDetails: details));
+    }
+    catch (Exception ex)
+    {
+        return Results.Json(new { error = ex.Message }, statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+});
+
+app.MapGet("/api/routes/{containerId}/{index:int}", async (
+    string containerId, int index, SyncOrchestrator orchestrator, CancellationToken ct) =>
+{
+    try
+    {
+        var route = await orchestrator.GetRouteDetailAsync(containerId, index, ct);
+        return route == null
+            ? Results.NotFound(new { error = "Route not found" })
+            : Results.Ok(route);
     }
     catch (Exception ex)
     {

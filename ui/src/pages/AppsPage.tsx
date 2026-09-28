@@ -17,8 +17,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
 import {
-  fetchRoutes,
-  fetchStats,
+  fetchDashboard,
   setRouteEnabled,
   syncRoute,
   type DashboardStats,
@@ -73,7 +72,7 @@ export function AppsPage() {
   const load = useCallback(async () => {
     try {
       setError(null)
-      const [s, r] = await Promise.all([fetchStats(), fetchRoutes()])
+      const { stats: s, routes: r } = await fetchDashboard()
       setStats(s)
       setRoutes(r)
     } catch (e) {
@@ -98,6 +97,8 @@ export function AppsPage() {
       } else if (r.hidden) {
         return false
       }
+
+      if (filter !== 'disabled' && r.status === 'Disabled') return false
 
       if (filter === 'synced' && r.status !== 'Synced') return false
       if (filter === 'missing' && r.status !== 'Missing') return false

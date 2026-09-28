@@ -51,6 +51,42 @@ public class IconResolver
         return string.IsNullOrEmpty(slug) ? null : CdnUrl(slug);
     }
 
+    /// <summary>Fast icon resolution for list views (no HTTP probes).</summary>
+    public string? GuessIconUrl(
+        string? overrideIcon,
+        string? labelIcon,
+        string? displayName,
+        string? containerName)
+    {
+        var normalizedOverride = NormalizeIconUrl(overrideIcon);
+        if (!string.IsNullOrWhiteSpace(normalizedOverride))
+            return normalizedOverride;
+
+        if (!string.IsNullOrWhiteSpace(labelIcon))
+        {
+            var label = labelIcon.Trim();
+            if (label.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+                label.StartsWith("https://", StringComparison.OrdinalIgnoreCase) ||
+                label.StartsWith("data:", StringComparison.OrdinalIgnoreCase) ||
+                label.StartsWith("/"))
+                return label;
+
+            var fromLabel = NormalizeIconUrl(label);
+            if (!string.IsNullOrEmpty(fromLabel))
+                return fromLabel;
+        }
+
+        foreach (var candidate in new[] { displayName, containerName })
+        {
+            var slug = ToSlug(candidate);
+            if (string.IsNullOrEmpty(slug))
+                continue;
+            return CdnUrl(slug);
+        }
+
+        return null;
+    }
+
     public async Task<string?> ResolveAsync(
         string? overrideIcon,
         string? labelIcon,

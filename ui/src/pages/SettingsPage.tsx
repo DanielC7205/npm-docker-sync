@@ -231,6 +231,20 @@ const SECTIONS: SectionDef[] = [
         description: 'Space-separated scopes requested during login.',
         placeholder: 'openid profile email',
       },
+      {
+        key: 'WEB_UI_PUBLIC_URL',
+        label: 'Public dashboard URL',
+        description:
+          'Full URL where you access this UI (e.g. https://npmsync.example.com). Used for OIDC redirect URIs and display.',
+        placeholder: 'https://npmsync.example.com',
+      },
+      {
+        key: 'WEB_UI_DOMAIN',
+        label: 'Public dashboard domain',
+        description:
+          'Shorthand hostname (npmsync or npmsync.example.com). Expands with PROXY_BASE_DOMAIN when no dot. Used when Public URL is empty.',
+        placeholder: 'npmsync',
+      },
     ],
   },
   {

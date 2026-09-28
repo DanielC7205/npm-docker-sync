@@ -35,6 +35,7 @@ public class SettingsStore
         "WEB_UI_TOKEN", "TUNNEL_API_TOKEN",
         "AUTH_REQUEST_DEFAULT", "AUTH_REQUEST_UPSTREAM",
         "PROXY_BASE_DOMAIN",
+        "WEB_UI_PUBLIC_URL", "WEB_UI_DOMAIN",
         "AUTO_BRIDGE_EXPOSED", "AUTO_BRIDGE_EXCLUDE",
         "TUNNEL_BASE_DOMAIN", "TUNNEL_FORWARD_HOST", "TUNNEL_DEFAULT_TTL_MINUTES", "TUNNEL_REQUIRE_AUTH",
         "FALLBACK_FORWARD_HOST", "UNAVAILABLE_FALLBACK_ENABLED",
@@ -52,6 +53,7 @@ public class SettingsStore
 
         Initialize();
         EnsureTunnelColumns();
+        EnsureRouteOverrideColumns();
         _logger.LogInformation("Settings store ready at {Path}", _dbPath);
     }
 
@@ -95,6 +97,55 @@ public class SettingsStore
                 """;
             cmd.ExecuteNonQuery();
         }
+    }
+
+    private void EnsureRouteOverrideColumns()
+    {
+        lock (_lock)
+        {
+            using var conn = Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "PRAGMA table_info(route_overrides);";
+            using var reader = cmd.ExecuteReader();
+            var columns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            while (reader.Read())
+            {
+                if (!reader.IsDBNull(1))
+                    columns.Add(reader.GetString(1));
+            }
+            reader.Close();
+
+            if (!columns.Contains("container_name"))
+            {
+                using var alter = conn.CreateCommand();
+                alter.CommandText = "ALTER TABLE route_overrides ADD COLUMN container_name TEXT;";
+                alter.ExecuteNonQuery();
+            }
+        }
+    }
+
+    public static string NormalizeContainerName(string? containerName) =>
+        (containerName ?? string.Empty).Trim().TrimStart('/').ToLowerInvariant();
+
+    /// <summary>Public base URL for the Web UI (no trailing slash), from WEB_UI_PUBLIC_URL or https://WEB_UI_DOMAIN.</summary>
+    public string? GetWebUiPublicBaseUrl()
+    {
+        var explicitUrl = Get("WEB_UI_PUBLIC_URL")?.Trim().TrimEnd('/');
+        if (!string.IsNullOrWhiteSpace(explicitUrl))
+            return explicitUrl;
+
+        var domain = Get("WEB_UI_DOMAIN")?.Trim().TrimStart('.');
+        if (string.IsNullOrWhiteSpace(domain))
+            return null;
+
+        if (!domain.Contains('.'))
+        {
+            var baseDomain = Get("PROXY_BASE_DOMAIN")?.Trim().TrimStart('.');
+            if (!string.IsNullOrWhiteSpace(baseDomain))
+                domain = $"{domain}.{baseDomain}";
+        }
+
+        return $"https://{domain}";
     }
 
     private void EnsureTunnelColumns()
@@ -230,6 +281,7 @@ public class SettingsStore
         result["SQLITE_PATH"] = _dbPath;
         result["AUTH_CONFIGURED"] = IsAuthConfigured();
         result["OIDC_CONFIGURED"] = IsOidcConfigured();
+        result["WEB_UI_PUBLIC_BASE_URL"] = GetWebUiPublicBaseUrl();
         return result;
     }
 
@@ -273,20 +325,76 @@ public class SettingsStore
         }
     }
 
-    public RouteOverride? GetRouteOverride(string containerId, int index)
+    public RouteOverride? GetRouteOverride(string containerId, string? containerName, int index)
     {
         lock (_lock)
         {
             using var conn = Open();
-            using var cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT payload FROM route_overrides WHERE container_id = $c AND proxy_index = $i";
-            cmd.Parameters.AddWithValue("$c", containerId);
-            cmd.Parameters.AddWithValue("$i", index);
-            var json = cmd.ExecuteScalar() as string;
+            var json = SelectOverridePayload(conn, "container_id = $c AND proxy_index = $i", containerId, index);
+            if (string.IsNullOrEmpty(json) && !string.IsNullOrWhiteSpace(containerName))
+            {
+                var normalized = NormalizeContainerName(containerName);
+                json = SelectOverridePayload(conn, "container_name = $n AND proxy_index = $i", normalized, index);
+                if (!string.IsNullOrEmpty(json))
+                    RebindOverrideContainerId(conn, normalized, index, containerId);
+            }
+
             if (string.IsNullOrEmpty(json))
                 return null;
             return JsonSerializer.Deserialize<RouteOverride>(json, JsonOpts());
         }
+    }
+
+    public void RebindRouteOverrides(string containerId, string containerName)
+    {
+        var normalized = NormalizeContainerName(containerName);
+        if (string.IsNullOrEmpty(normalized))
+            return;
+
+        lock (_lock)
+        {
+            using var conn = Open();
+            RebindOverrideContainerId(conn, normalized, null, containerId);
+        }
+    }
+
+    private static string? SelectOverridePayload(SqliteConnection conn, string where, string key, int index)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = $"SELECT payload FROM route_overrides WHERE {where}";
+        if (where.Contains("$c"))
+            cmd.Parameters.AddWithValue("$c", key);
+        else
+            cmd.Parameters.AddWithValue("$n", key);
+        cmd.Parameters.AddWithValue("$i", index);
+        return cmd.ExecuteScalar() as string;
+    }
+
+    private static void RebindOverrideContainerId(SqliteConnection conn, string containerName, int? proxyIndex, string containerId)
+    {
+        using var cmd = conn.CreateCommand();
+        if (proxyIndex.HasValue)
+        {
+            cmd.CommandText = """
+                UPDATE route_overrides
+                SET container_id = $id, container_name = $name, updated_at = $t
+                WHERE container_name = $name AND proxy_index = $i
+                """;
+            cmd.Parameters.AddWithValue("$i", proxyIndex.Value);
+        }
+        else
+        {
+            cmd.CommandText = """
+                UPDATE route_overrides
+                SET container_id = $id, updated_at = $t
+                WHERE container_name = $name AND container_id != $id
+                """;
+        }
+
+        cmd.Parameters.AddWithValue("$id", containerId);
+        cmd.Parameters.AddWithValue("$name", containerName);
+        cmd.Parameters.AddWithValue("$t", DateTime.UtcNow.ToString("o"));
+        cmd.ExecuteNonQuery();
     }
 
     public Dictionary<(string ContainerId, int Index), RouteOverride> GetAllRouteOverrides()
@@ -312,21 +420,24 @@ public class SettingsStore
         return result;
     }
 
-    public void UpsertRouteOverride(string containerId, int index, RouteOverride overrideData)
+    public void UpsertRouteOverride(string containerId, string containerName, int index, RouteOverride overrideData)
     {
         var json = JsonSerializer.Serialize(overrideData, JsonOpts());
+        var normalizedName = NormalizeContainerName(containerName);
         lock (_lock)
         {
             using var conn = Open();
             using var cmd = conn.CreateCommand();
             cmd.CommandText = """
-                INSERT INTO route_overrides(container_id, proxy_index, payload, updated_at)
-                VALUES ($c, $i, $p, $t)
+                INSERT INTO route_overrides(container_id, container_name, proxy_index, payload, updated_at)
+                VALUES ($c, $n, $i, $p, $t)
                 ON CONFLICT(container_id, proxy_index) DO UPDATE SET
+                    container_name = excluded.container_name,
                     payload = excluded.payload,
                     updated_at = excluded.updated_at
                 """;
             cmd.Parameters.AddWithValue("$c", containerId);
+            cmd.Parameters.AddWithValue("$n", normalizedName);
             cmd.Parameters.AddWithValue("$i", index);
             cmd.Parameters.AddWithValue("$p", json);
             cmd.Parameters.AddWithValue("$t", DateTime.UtcNow.ToString("o"));
@@ -334,16 +445,27 @@ public class SettingsStore
         }
     }
 
-    public void DeleteRouteOverride(string containerId, int index)
+    public void DeleteRouteOverride(string containerId, string? containerName, int index)
     {
         lock (_lock)
         {
             using var conn = Open();
-            using var cmd = conn.CreateCommand();
-            cmd.CommandText = "DELETE FROM route_overrides WHERE container_id = $c AND proxy_index = $i";
-            cmd.Parameters.AddWithValue("$c", containerId);
-            cmd.Parameters.AddWithValue("$i", index);
-            cmd.ExecuteNonQuery();
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = "DELETE FROM route_overrides WHERE container_id = $c AND proxy_index = $i";
+                cmd.Parameters.AddWithValue("$c", containerId);
+                cmd.Parameters.AddWithValue("$i", index);
+                cmd.ExecuteNonQuery();
+            }
+
+            if (!string.IsNullOrWhiteSpace(containerName))
+            {
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = "DELETE FROM route_overrides WHERE container_name = $n AND proxy_index = $i";
+                cmd.Parameters.AddWithValue("$n", NormalizeContainerName(containerName));
+                cmd.Parameters.AddWithValue("$i", index);
+                cmd.ExecuteNonQuery();
+            }
         }
     }
 

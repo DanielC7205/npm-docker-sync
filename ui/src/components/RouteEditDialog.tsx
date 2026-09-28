@@ -29,6 +29,7 @@ import { Switch } from '@/components/ui/switch'
 import {
   clearRouteOverride,
   fetchCertificates,
+  fetchRouteDetail,
   fetchRoutes,
   patchRoute,
   testUpstream,
@@ -117,10 +118,21 @@ export function RouteEditDialog({
     void fetchCertificates()
       .then(setCerts)
       .catch(() => setCerts([]))
-    void fetchRoutes()
+    void fetchRoutes(false)
       .then(setAllRoutes)
       .catch(() => setAllRoutes([]))
   }, [open])
+
+  useEffect(() => {
+    if (!open || !route) return
+    void fetchRouteDetail(route.containerId, route.index)
+      .then((detail) => {
+        setHost(detail.forwardHost ?? '')
+        setPort(detail.forwardPort?.toString() ?? '')
+        setLocations(detail.locations ?? [])
+      })
+      .catch(() => {})
+  }, [open, route?.containerId, route?.index])
 
   useEffect(() => {
     if (!route) return
