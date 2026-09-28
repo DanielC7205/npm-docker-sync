@@ -1,3 +1,4 @@
+using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text;
@@ -12,34 +13,124 @@ public class NginxProxyManagerClient
 {
     private readonly HttpClient _httpClient;
     private readonly ILogger<NginxProxyManagerClient> _logger;
-    private readonly string _baseUrl;
-    private readonly string _email;
-    private readonly string _password;
+    private readonly SettingsStore _settings;
+    private readonly IConfiguration _configuration;
     private string? _token;
     private string? _sessionCookieHeader;
     private DateTime _tokenExpiry = DateTime.MinValue;
+    private string? _credentialFingerprint;
 
     public NginxProxyManagerClient(
         HttpClient httpClient,
         ILogger<NginxProxyManagerClient> logger,
+        SettingsStore settings,
         IConfiguration configuration)
     {
         _httpClient = httpClient;
         _logger = logger;
+        _settings = settings;
+        _configuration = configuration;
 
-        var rawUrl = configuration["NPM_URL"] ?? throw new ArgumentException("NPM_URL is required");
-        _baseUrl = UrlNormalizer.Normalize(rawUrl);
-        _email = configuration["NPM_EMAIL"] ?? throw new ArgumentException("NPM_EMAIL is required");
-        _password = configuration["NPM_PASSWORD"] ?? throw new ArgumentException("NPM_PASSWORD is required");
-
-        _httpClient.BaseAddress = new Uri(_baseUrl);
-
-        if (IsTruthy(configuration["NPM_TLS_SKIP_VERIFY"]))
+        if (IsTruthy(_settings.Get("NPM_TLS_SKIP_VERIFY") ?? configuration["NPM_TLS_SKIP_VERIFY"]))
         {
             _logger.LogWarning("NPM_TLS_SKIP_VERIFY is enabled — TLS certificate validation is disabled for NPM API calls");
         }
 
-        _logger.LogInformation("NPM API base URL: {BaseUrl}", _baseUrl);
+        try
+        {
+            var (baseUrl, _, _) = GetCredentials();
+            _httpClient.BaseAddress = new Uri(baseUrl);
+            _logger.LogInformation("NPM API base URL: {BaseUrl}", baseUrl);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "NPM credentials not fully configured at startup — set NPM_URL, NPM_EMAIL, and NPM_PASSWORD");
+        }
+    }
+
+    private (string BaseUrl, string Email, string Password) GetCredentials()
+    {
+        var rawUrl = _settings.Get("NPM_URL") ?? _configuration["NPM_URL"];
+        var email = _settings.Get("NPM_EMAIL") ?? _configuration["NPM_EMAIL"];
+        var password = _settings.Get("NPM_PASSWORD") ?? _configuration["NPM_PASSWORD"];
+
+        if (string.IsNullOrWhiteSpace(rawUrl))
+            throw new ArgumentException("NPM_URL is required");
+        if (string.IsNullOrWhiteSpace(email))
+            throw new ArgumentException("NPM_EMAIL is required");
+        if (string.IsNullOrWhiteSpace(password))
+            throw new ArgumentException("NPM_PASSWORD is required");
+
+        return (UrlNormalizer.Normalize(rawUrl), email.Trim(), password);
+    }
+
+    private void SyncConnectionSettings()
+    {
+        var (baseUrl, email, password) = GetCredentials();
+        var fingerprint = $"{baseUrl}|{email}|{password}";
+
+        if (!string.Equals(fingerprint, _credentialFingerprint, StringComparison.Ordinal))
+        {
+            _credentialFingerprint = fingerprint;
+            InvalidateAuth();
+        }
+
+        var normalizedBase = baseUrl.TrimEnd('/') + "/";
+        if (_httpClient.BaseAddress == null ||
+            !string.Equals(_httpClient.BaseAddress.ToString().TrimEnd('/') + "/",
+                normalizedBase, StringComparison.OrdinalIgnoreCase))
+        {
+            _httpClient.BaseAddress = new Uri(normalizedBase);
+            _logger.LogInformation("NPM API base URL: {BaseUrl}", baseUrl);
+        }
+    }
+
+    private void InvalidateAuth()
+    {
+        _token = null;
+        _sessionCookieHeader = null;
+        _tokenExpiry = DateTime.MinValue;
+    }
+
+    private async Task<(HttpResponseMessage Response, string Body)> SendAuthenticatedAsync(
+        Func<Task<HttpResponseMessage>> send,
+        CancellationToken cancellationToken)
+    {
+        for (var attempt = 0; attempt < 2; attempt++)
+        {
+            await EnsureAuthenticated(cancellationToken);
+            var response = await send();
+            var body = await response.Content.ReadAsStringAsync(cancellationToken);
+
+            if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden && attempt == 0)
+            {
+                _logger.LogWarning(
+                    "NPM API returned {StatusCode}; clearing session and retrying once",
+                    (int)response.StatusCode);
+                InvalidateAuth();
+                continue;
+            }
+
+            return (response, body);
+        }
+
+        throw new InvalidOperationException("NPM API request failed after auth retry");
+    }
+
+    private void LogPermissionDenied(string operation, string body)
+    {
+        var (_, email, _) = GetCredentials();
+        _logger.LogError(
+            """
+            NPM API permission denied while {Operation} (user {Email}).
+            Use an NPM/NPMplus administrator account with full proxy host access.
+            Point NPM_URL at the internal admin API (e.g. http://npmplus:81 or http://127.0.0.1:81), not a public URL that may block /api/*.
+            If credentials were changed in the Web UI settings, restart the container or wait for the next request to re-authenticate.
+            Response: {Body}
+            """,
+            operation,
+            email,
+            Truncate(body, 500));
     }
 
     private static bool IsTruthy(string? value) =>
@@ -47,16 +138,19 @@ public class NginxProxyManagerClient
 
     private async Task EnsureAuthenticated(CancellationToken cancellationToken)
     {
+        SyncConnectionSettings();
+
         if ((!string.IsNullOrEmpty(_token) || !string.IsNullOrEmpty(_sessionCookieHeader)) &&
             DateTime.UtcNow < _tokenExpiry)
             return;
 
-        _logger.LogInformation("Authenticating with NPMplus / NPM at {BaseUrl}", _baseUrl);
+        var (baseUrl, email, password) = GetCredentials();
+        _logger.LogInformation("Authenticating with NPMplus / NPM at {BaseUrl} as {Email}", baseUrl, email);
 
         var loginRequest = new
         {
-            identity = _email,
-            secret = _password
+            identity = email,
+            secret = password
         };
 
         var response = await _httpClient.PostAsJsonAsync("/api/tokens", loginRequest, cancellationToken);
@@ -160,15 +254,17 @@ public class NginxProxyManagerClient
 
     public async Task<List<ProxyHost>> GetProxyHostsAsync(CancellationToken cancellationToken)
     {
-        await EnsureAuthenticated(cancellationToken);
-
-        var response = await _httpClient.GetAsync("/api/nginx/proxy-hosts", cancellationToken);
-        var body = await response.Content.ReadAsStringAsync(cancellationToken);
+        var (response, body) = await SendAuthenticatedAsync(
+            () => _httpClient.GetAsync("/api/nginx/proxy-hosts", cancellationToken),
+            cancellationToken);
 
         if (!response.IsSuccessStatusCode)
         {
-            _logger.LogError("Failed to list proxy hosts: {Status} {Body}",
-                (int)response.StatusCode, Truncate(body, 500));
+            if (response.StatusCode == HttpStatusCode.Forbidden)
+                LogPermissionDenied("listing proxy hosts", body);
+            else
+                _logger.LogError("Failed to list proxy hosts: {Status} {Body}",
+                    (int)response.StatusCode, Truncate(body, 500));
             response.EnsureSuccessStatusCode();
         }
 
