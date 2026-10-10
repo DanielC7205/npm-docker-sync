@@ -5,7 +5,9 @@ import {
   EyeOff,
   Folder,
   Grid2X2,
+  Link2,
   Pencil,
+  Plus,
   RefreshCw,
   Search,
   Server,
@@ -17,6 +19,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
 import {
+  adoptOrphanHosts,
   fetchDashboard,
   setRouteEnabled,
   syncRoute,
@@ -25,6 +28,7 @@ import {
   type RouteStatus,
 } from '@/lib/api'
 import { cn, formatUptime } from '@/lib/utils'
+import { AddRouteDialog } from '@/components/AddRouteDialog'
 import { RouteEditDialog } from '@/components/RouteEditDialog'
 
 type FilterKey = 'all' | 'synced' | 'missing' | 'disabled' | 'docker' | 'hidden'
@@ -68,6 +72,8 @@ export function AppsPage() {
   const [search, setSearch] = useState('')
   const [busyKey, setBusyKey] = useState<string | null>(null)
   const [editRoute, setEditRoute] = useState<RouteInfo | null>(null)
+  const [addOpen, setAddOpen] = useState(false)
+  const [adoptMsg, setAdoptMsg] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     try {
@@ -128,6 +134,28 @@ export function AppsPage() {
     }
   }
 
+  async function onAdoptOrphans() {
+    setBusyKey('adopt')
+    setAdoptMsg(null)
+    try {
+      const result = await adoptOrphanHosts()
+      const n = result.adopted.length
+      const skip = result.skipped.length
+      setAdoptMsg(
+        n > 0
+          ? `Adopted ${n} host(s) by domain.${skip > 0 ? ` ${skip} skipped.` : ''}`
+          : skip > 0
+            ? `No hosts adopted. ${skip} skipped.`
+            : 'No orphan hosts needed adoption.',
+      )
+      await load()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Adopt failed')
+    } finally {
+      setBusyKey(null)
+    }
+  }
+
   async function onSync(route: RouteInfo) {
     const key = `sync:${route.containerId}`
     setBusyKey(key)
@@ -159,11 +187,33 @@ export function AppsPage() {
             Proxied containers synced to NPMplus. Open a service or click Edit to change domains, TLS, and more.
           </p>
         </div>
-        <Button variant="outline" size="sm" onClick={() => void load()} className="gap-1.5">
-          <RefreshCw className="size-4" />
-          Refresh
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          <Button variant="default" size="sm" onClick={() => setAddOpen(true)} className="gap-1.5">
+            <Plus className="size-4" />
+            Add route
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={busyKey === 'adopt'}
+            onClick={() => void onAdoptOrphans()}
+            className="gap-1.5"
+          >
+            <Link2 className="size-4" />
+            Adopt orphans
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => void load()} className="gap-1.5">
+            <RefreshCw className="size-4" />
+            Refresh
+          </Button>
+        </div>
       </div>
+
+      {adoptMsg && (
+        <div className="rounded-lg border border-border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">
+          {adoptMsg}
+        </div>
+      )}
 
       {error && (
         <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
@@ -324,6 +374,8 @@ export function AppsPage() {
           })}
         </div>
       )}
+
+      <AddRouteDialog open={addOpen} onOpenChange={setAddOpen} onCreated={() => void load()} />
 
       <RouteEditDialog
         route={editRoute}

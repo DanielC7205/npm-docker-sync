@@ -369,6 +369,45 @@ app.MapPost("/api/routes/{containerId}/sync", async (
     }
 });
 
+app.MapGet("/api/containers", async (SyncOrchestrator orchestrator, CancellationToken ct) =>
+{
+    try
+    {
+        return Results.Ok(await orchestrator.ListRouteContainersAsync(ct));
+    }
+    catch (Exception ex)
+    {
+        return Results.Json(new { error = ex.Message }, statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+});
+
+app.MapPost("/api/routes/{containerId}", async (
+    string containerId, RouteOverride body, SyncOrchestrator orchestrator, CancellationToken ct) =>
+{
+    try
+    {
+        var route = await orchestrator.CreateManualRouteAsync(containerId, body, ct);
+        return Results.Ok(route);
+    }
+    catch (Exception ex)
+    {
+        return Results.BadRequest(new { error = ex.Message });
+    }
+});
+
+app.MapPost("/api/routes/adopt-orphans", async (SyncOrchestrator orchestrator, CancellationToken ct) =>
+{
+    try
+    {
+        var result = await orchestrator.AdoptOrphanHostsByDomainAsync(ct);
+        return Results.Ok(result);
+    }
+    catch (Exception ex)
+    {
+        return Results.BadRequest(new { error = ex.Message });
+    }
+});
+
 app.MapGet("/api/certificates", async (CertificateService certs, CancellationToken ct) =>
 {
     try

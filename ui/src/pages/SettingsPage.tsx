@@ -99,6 +99,26 @@ const SECTIONS: SectionDef[] = [
         description: 'If a proxy already exists for a domain, take ownership instead of failing create.',
         bool: true,
       },
+      {
+        key: 'AUTO_RESYNC_MISSING',
+        label: 'Re-sync missing NPM hosts',
+        description:
+          'Recreate proxies when they were deleted in NPMplus or after a redeploy left stale mappings. Also runs on a periodic reconcile.',
+        bool: true,
+      },
+      {
+        key: 'NPM_RECONCILE_INTERVAL_MINUTES',
+        label: 'Reconcile interval (minutes)',
+        description: 'How often to scan for missing NPM hosts when re-sync missing is enabled.',
+        placeholder: '5',
+      },
+      {
+        key: 'NPM_DISABLE_ON_REMOVE',
+        label: 'Disable instead of delete',
+        description:
+          'When labels are removed or a container is cleaned up, disable the NPM host instead of deleting it (keeps the same ID).',
+        bool: true,
+      },
     ],
   },
   {
@@ -122,7 +142,8 @@ const SECTIONS: SectionDef[] = [
       {
         key: 'AUTO_BRIDGE_EXCLUDE',
         label: 'Never bridge keywords',
-        description: 'Comma-separated substrings matched against container name and image. Matching containers are skipped for auto-bridge and labeled sync.',
+        description:
+          'Comma-separated substrings matched against container name and image. Skips auto-bridge only; containers with npm/proxy labels still sync.',
         placeholder: 'npmplus,npm-docker-sync,nginx-proxy-manager',
         chips: true,
       },

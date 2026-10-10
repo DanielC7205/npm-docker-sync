@@ -43,7 +43,9 @@ public class DockerMonitorService : BackgroundService
                 await _networkService.InitializeAsync(stoppingToken);
                 await RestoreStateWithRetry(stoppingToken);
                 await PerformInitialScan(stoppingToken);
+                var reconcile = StartMissingHostReconcileLoop(stoppingToken);
                 await MonitorDockerEvents(stoppingToken);
+                await reconcile;
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -89,6 +91,33 @@ public class DockerMonitorService : BackgroundService
                 await Task.Delay(delay, stoppingToken);
             }
         }
+    }
+
+    private Task StartMissingHostReconcileLoop(CancellationToken stoppingToken)
+    {
+        return Task.Run(async () =>
+        {
+            var intervalMinutes = 5;
+            if (int.TryParse(_settings.Get("NPM_RECONCILE_INTERVAL_MINUTES"), out var parsed) && parsed > 0)
+                intervalMinutes = parsed;
+
+            while (!stoppingToken.IsCancellationRequested)
+            {
+                try
+                {
+                    await Task.Delay(TimeSpan.FromMinutes(intervalMinutes), stoppingToken);
+                    await _syncOrchestrator.ReconcileMissingMappingsAsync(stoppingToken);
+                }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                {
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Missing-host reconcile loop error");
+                }
+            }
+        }, stoppingToken);
     }
 
     private async Task PerformInitialScan(CancellationToken stoppingToken)

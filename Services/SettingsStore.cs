@@ -25,7 +25,8 @@ public class SettingsStore
     public static readonly string[] SettingKeys =
     {
         "NPM_URL", "NPM_EMAIL", "NPM_PASSWORD", "NPM_CONTAINER_NAME", "DOCKER_HOST_IP",
-        "NPM_TLS_SKIP_VERIFY", "NPM_ADOPT_EXISTING",
+        "NPM_TLS_SKIP_VERIFY", "NPM_ADOPT_EXISTING", "NPM_DISABLE_ON_REMOVE",
+        "AUTO_RESYNC_MISSING", "NPM_RECONCILE_INTERVAL_MINUTES",
         "NPM_PROXY_SSL_FORCE", "NPM_PROXY_CACHING", "NPM_PROXY_BLOCK_EXPLOITS",
         "NPM_PROXY_WEBSOCKETS", "NPM_PROXY_HTTP2", "NPM_PROXY_HSTS", "NPM_PROXY_HSTS_SUBDOMAINS",
         "NPM_PROXY_DEFAULT_CERTIFICATE_ID", "CERT_DOMAIN_MAP", "TUNNEL_CERTIFICATE_ID",
@@ -397,6 +398,36 @@ public class SettingsStore
         cmd.ExecuteNonQuery();
     }
 
+    public List<int> ListOverrideIndices(string containerId, string? containerName)
+    {
+        var indices = new HashSet<int>();
+        lock (_lock)
+        {
+            using var conn = Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT proxy_index FROM route_overrides WHERE container_id = $c";
+            cmd.Parameters.AddWithValue("$c", containerId);
+            using (var reader = cmd.ExecuteReader())
+            {
+                while (reader.Read())
+                    indices.Add(reader.GetInt32(0));
+            }
+
+            if (!string.IsNullOrWhiteSpace(containerName))
+            {
+                var normalized = NormalizeContainerName(containerName);
+                cmd.Parameters.Clear();
+                cmd.CommandText = "SELECT proxy_index FROM route_overrides WHERE container_name = $n";
+                cmd.Parameters.AddWithValue("$n", normalized);
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                    indices.Add(reader.GetInt32(0));
+            }
+        }
+
+        return indices.OrderBy(i => i).ToList();
+    }
+
     public Dictionary<(string ContainerId, int Index), RouteOverride> GetAllRouteOverrides()
     {
         var result = new Dictionary<(string, int), RouteOverride>();
@@ -624,6 +655,9 @@ public class SettingsStore
 
 public class RouteOverride
 {
+    /// <summary>Route created from the UI without Docker npm/proxy labels.</summary>
+    public bool? Manual { get; set; }
+
     public string? DisplayName { get; set; }
     public List<string>? Domains { get; set; }
     public bool? Hidden { get; set; }

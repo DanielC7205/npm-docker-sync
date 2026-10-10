@@ -29,6 +29,16 @@ public class SyncOrchestrator
 
     private bool AdoptExisting => _settings.GetBool("NPM_ADOPT_EXISTING");
 
+    private bool AutoResyncMissing => _settings.GetBool("AUTO_RESYNC_MISSING", defaultValue: true);
+
+    private bool DisableOnRemove => _settings.GetBool("NPM_DISABLE_ON_REMOVE");
+
+    private static bool HasSyncLabels(IDictionary<string, string> labels) =>
+        labels.Any(l =>
+            l.Key.StartsWith("npm.") ||
+            l.Key.StartsWith("npm-") ||
+            l.Key.StartsWith("proxy.", StringComparison.OrdinalIgnoreCase));
+
     // Key format: "containerId:proxyIndex" -> NPM proxy host ID
     private readonly ConcurrentDictionary<string, int> _containerProxyMap = new();
     // Key format: "containerId:streamIndex" -> NPM stream ID
@@ -158,6 +168,8 @@ public class SyncOrchestrator
                 }
             }
 
+            HydrateRouteOverridesFromNpm(managedProxies);
+
             _logger.LogInformation(
                 "State restored: {ProxyCount}/{TotalProxies} managed proxy(s), {StreamCount} stream(s), {HashCount} label hash(es)",
                 managedProxies.Count, allProxies.Count, managedStreams.Count, _containerLabelHashes.Count);
@@ -178,9 +190,11 @@ public class SyncOrchestrator
             _settings.RebindRouteOverrides(containerId, containerName);
             _containerNames[containerId] = containerName;
 
-            if (MatchesNeverBridgeKeywords(containerName, null))
+            if (MatchesNeverBridgeKeywords(containerName, null) && !HasSyncLabels(labels))
             {
-                _logger.LogInformation("Skipping container {ContainerName} — matches never-bridge keywords", containerName);
+                _logger.LogInformation(
+                    "Skipping container {ContainerName} — matches never-bridge keywords (auto-bridge only; add npm/proxy labels to sync explicitly)",
+                    containerName);
                 if (_containerProxyMap.Keys.Any(k => k.StartsWith($"{containerId}:")) ||
                     _containerStreamMap.Keys.Any(k => k.StartsWith($"{containerId}:")))
                 {
@@ -194,6 +208,7 @@ public class SyncOrchestrator
 
             var proxyConfigs = _labelParser.ParseLabels(labels);
             var streamConfigs = _labelParser.ParseStreamLabels(labels);
+            await MergeManualRouteConfigsAsync(containerId, containerName, proxyConfigs, cancellationToken);
 
             if (proxyConfigs.Count == 0 && !_labelParser.IsExcluded(labels))
             {
@@ -218,11 +233,20 @@ public class SyncOrchestrator
 
                 if (hasExistingProxies || hasExistingStreams)
                 {
-                    _logger.LogInformation("✓ Container {ContainerName} unchanged - {ProxyCount} proxy(s), {StreamCount} stream(s) already managed",
-                        containerName,
-                        _containerProxyMap.Keys.Count(k => k.StartsWith($"{containerId}:")),
-                        _containerStreamMap.Keys.Count(k => k.StartsWith($"{containerId}:")));
-                    return;
+                    if (AutoResyncMissing && await AnyMappedNpmResourcesMissingAsync(containerId, cancellationToken))
+                    {
+                        _logger.LogInformation(
+                            "Re-syncing container {ContainerName} — mapped NPM host(s) or stream(s) are missing",
+                            containerName);
+                    }
+                    else
+                    {
+                        _logger.LogInformation("✓ Container {ContainerName} unchanged - {ProxyCount} proxy(s), {StreamCount} stream(s) already managed",
+                            containerName,
+                            _containerProxyMap.Keys.Count(k => k.StartsWith($"{containerId}:")),
+                            _containerStreamMap.Keys.Count(k => k.StartsWith($"{containerId}:")));
+                        return;
+                    }
                 }
 
                 var needsOverrideSync = proxyConfigs.Keys.Any(idx =>
@@ -523,7 +547,7 @@ public class SyncOrchestrator
                 continue;
             }
 
-            if (MatchesNeverBridgeKeywords(containerName, container.Image))
+            if (MatchesNeverBridgeKeywords(containerName, container.Image) && !HasSyncLabels(labels))
             {
                 routes.Add(new RouteInfo
                 {
@@ -546,6 +570,8 @@ public class SyncOrchestrator
                 if (auto != null)
                     configs[0] = auto;
             }
+
+            await MergeManualRouteConfigsAsync(containerId, containerName, configs, cancellationToken);
 
             if (configs.Count == 0)
                 continue;
@@ -848,9 +874,12 @@ public class SyncOrchestrator
 
         if (_containerProxyMap.TryGetValue(proxyKey, out var existingHostId))
         {
-            _logger.LogInformation("Labels changed for container {ContainerName} proxy {Index}. Deleting and recreating proxy host {HostId}.",
-                containerName, index, existingHostId);
-            await RemoveProxy(containerId, containerName, index, cancellationToken);
+            var uiDisabled = _uiDisabledProxies.ContainsKey(proxyKey);
+            _logger.LogInformation(
+                "Updating existing proxy host {HostId} for container {ContainerName} proxy {Index}",
+                existingHostId, containerName, index);
+            await UpdateExistingProxyHost(proxyKey, existingHostId, containerId, config, uiDisabled, cancellationToken);
+            return;
         }
 
         await CreateOrUpdateProxyHost(containerId, index, config, cancellationToken);
@@ -946,12 +975,27 @@ public class SyncOrchestrator
             foreach (var proxyKey in proxyKeys)
             {
                 var index = int.Parse(proxyKey.Split(':')[1]);
-                if (_fallback.Value.IsEnabled() && _containerProxyMap.TryGetValue(proxyKey, out var hostId))
+                if (!_containerProxyMap.TryGetValue(proxyKey, out var hostId))
+                {
+                    await RemoveProxy(containerId, containerName, index, cancellationToken);
+                    _uiDisabledProxies.TryRemove(proxyKey, out _);
+                    continue;
+                }
+
+                if (!await ShouldMutateProxyHostAsync(hostId, containerId, cancellationToken))
+                {
+                    _containerProxyMap.TryRemove(proxyKey, out _);
+                    _uiDisabledProxies.TryRemove(proxyKey, out _);
+                    continue;
+                }
+
+                if (_fallback.Value.IsEnabled())
                 {
                     try
                     {
                         await _fallback.Value.RetargetHostAsync(hostId, "service", containerName, "stopped", cancellationToken);
                         _uiDisabledProxies[proxyKey] = true;
+                        _containerProxyMap.TryRemove(proxyKey, out _);
                         continue;
                     }
                     catch (Exception ex)
@@ -993,12 +1037,133 @@ public class SyncOrchestrator
 
             try
             {
+                if (!await ShouldMutateProxyHostAsync(proxyHostId, containerId, cancellationToken))
+                    return;
+
+                if (DisableOnRemove)
+                {
+                    await _npmClient.SetProxyHostEnabledAsync(proxyHostId, false, cancellationToken);
+                    _logger.LogInformation("Disabled proxy host {HostId} (NPM_DISABLE_ON_REMOVE)", proxyHostId);
+                    return;
+                }
+
                 await _npmClient.DeleteProxyHostAsync(proxyHostId, cancellationToken);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error deleting proxy host {HostId} for container {ContainerName} proxy {Index}",
                     proxyHostId, containerName, index);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Returns false when the NPM resource was already removed or reassigned to another container (e.g. after redeploy).
+    /// </summary>
+    private async Task<bool> ShouldMutateProxyHostAsync(int proxyHostId, string containerId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var host = await _npmClient.GetProxyHostByIdAsync(proxyHostId, cancellationToken);
+            if (host == null)
+            {
+                _logger.LogDebug("Proxy host {HostId} already gone in NPM", proxyHostId);
+                return false;
+            }
+
+            var ownerId = NginxProxyManagerClient.GetManagedContainerId(host);
+            if (!string.IsNullOrEmpty(ownerId) &&
+                !ownerId.Equals(containerId, StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogInformation(
+                    "Skipping proxy host {HostId} — metadata container_id is {OwnerId}, not {ContainerId}",
+                    proxyHostId, ownerId, containerId);
+                return false;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Could not verify ownership for proxy host {HostId}", proxyHostId);
+        }
+
+        return true;
+    }
+
+    private async Task<bool> AnyMappedNpmResourcesMissingAsync(string containerId, CancellationToken cancellationToken)
+    {
+        var proxyKeys = _containerProxyMap.Keys.Where(k => k.StartsWith($"{containerId}:", StringComparison.Ordinal)).ToList();
+        foreach (var proxyKey in proxyKeys)
+        {
+            if (!_containerProxyMap.TryGetValue(proxyKey, out var hostId))
+                continue;
+
+            try
+            {
+                var host = await _npmClient.GetProxyHostByIdAsync(hostId, cancellationToken);
+                if (host == null)
+                    return true;
+            }
+            catch
+            {
+                return true;
+            }
+        }
+
+        var streamKeys = _containerStreamMap.Keys.Where(k => k.StartsWith($"{containerId}:", StringComparison.Ordinal)).ToList();
+        if (streamKeys.Count > 0)
+        {
+            try
+            {
+                var streams = await _npmClient.GetStreamsAsync(cancellationToken);
+                var streamIds = streams.Select(s => s.Id).ToHashSet();
+                foreach (var streamKey in streamKeys)
+                {
+                    if (_containerStreamMap.TryGetValue(streamKey, out var streamId) && !streamIds.Contains(streamId))
+                        return true;
+                }
+            }
+            catch
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    public async Task ReconcileMissingMappingsAsync(CancellationToken cancellationToken)
+    {
+        if (!AutoResyncMissing)
+            return;
+
+        await EnsureInstanceIdAsync(cancellationToken);
+
+        var containerIds = _containerProxyMap.Keys
+            .Concat(_containerStreamMap.Keys)
+            .Select(k => k.Split(':')[0])
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        foreach (var containerId in containerIds)
+        {
+            if (!await AnyMappedNpmResourcesMissingAsync(containerId, cancellationToken))
+                continue;
+
+            try
+            {
+                var container = await _dockerClient.Containers.InspectContainerAsync(containerId, cancellationToken);
+                var name = container.Name.TrimStart('/');
+                var labels = container.Config?.Labels ?? new Dictionary<string, string>();
+                _containerLabelHashes.TryRemove(containerId, out _);
+                await ProcessContainer(containerId, name, labels, cancellationToken);
+            }
+            catch (DockerContainerNotFoundException)
+            {
+                _logger.LogDebug("Container {ContainerId} no longer running; skipping missing-host reconcile", containerId);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to reconcile missing NPM mapping for container {ContainerId}", containerId);
             }
         }
     }
@@ -1101,6 +1266,7 @@ public class SyncOrchestrator
         try
         {
             var request = _labelParser.ToProxyHostRequest(config, containerId, _instanceId!, NpmUrl, uiDisabled);
+            AttachRouteOverrideMeta(request, containerId, index, existingHost);
             var newHost = await _npmClient.CreateProxyHostAsync(request, cancellationToken);
             RecordCreatedProxy(proxyKey, newHost.Id, config, uiDisabled);
         }
@@ -1153,20 +1319,26 @@ public class SyncOrchestrator
         await ResolveLinkedLocationsAsync(config, cancellationToken);
         var request = _labelParser.ToProxyHostRequest(config, containerId, _instanceId!, NpmUrl, uiDisabled);
 
-        // Preserve NPM locations when override did not set them
-        if (config.Locations == null)
+        ProxyHost? existingHost = null;
+        try
         {
-            try
+            existingHost = await _npmClient.GetProxyHostByIdAsync(hostId, cancellationToken);
+            if (existingHost?.Locations != null && config.Locations == null)
+                request.Locations = existingHost.Locations;
+
+            if (existingHost?.Meta != null &&
+                existingHost.Meta.TryGetValue("created_at", out var createdAt) &&
+                createdAt != null)
             {
-                var existing = await _npmClient.GetProxyHostByIdAsync(hostId, cancellationToken);
-                if (existing?.Locations != null)
-                    request.Locations = existing.Locations;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogDebug(ex, "Could not preserve locations for host {HostId}", hostId);
+                request.Meta["created_at"] = createdAt;
             }
         }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Could not preserve locations for host {HostId}", hostId);
+        }
+
+        AttachRouteOverrideMeta(request, containerId, config.Index, existingHost);
 
         var updated = await _npmClient.UpdateProxyHostAsync(hostId, request, cancellationToken);
         RecordCreatedProxy(proxyKey, updated.Id, config, uiDisabled);
@@ -1446,7 +1618,10 @@ public class SyncOrchestrator
         if (patch.AllowWebsocketUpgrade.HasValue) target.AllowWebsocketUpgrade = patch.AllowWebsocketUpgrade;
         if (patch.CachingEnabled.HasValue) target.CachingEnabled = patch.CachingEnabled;
         if (patch.BlockExploits.HasValue) target.BlockExploits = patch.BlockExploits;
-        if (patch.CertificateId.HasValue) target.CertificateId = patch.CertificateId;
+        if (patch.CertificateId is > 0)
+            target.CertificateId = patch.CertificateId;
+        if (patch.Manual.HasValue)
+            target.Manual = patch.Manual;
         if (patch.AuthRequest != null) target.AuthRequest = patch.AuthRequest;
         if (patch.AuthRequestUpstream != null) target.AuthRequestUpstream = patch.AuthRequestUpstream;
         if (patch.AuthExempt.HasValue) target.AuthExempt = patch.AuthExempt;
@@ -1456,6 +1631,286 @@ public class SyncOrchestrator
                 : IconResolver.NormalizeIconUrl(patch.Icon);
         if (patch.AdvancedConfig != null) target.AdvancedConfig = patch.AdvancedConfig;
         if (patch.Locations != null) target.Locations = patch.Locations;
+    }
+
+    private void HydrateRouteOverridesFromNpm(IEnumerable<ProxyHost> managedProxies)
+    {
+        foreach (var proxy in managedProxies)
+        {
+            var fromNpm = RouteOverrideMeta.TryParse(proxy);
+            if (fromNpm == null)
+                continue;
+
+            var containerId = NginxProxyManagerClient.GetManagedContainerId(proxy);
+            var index = NginxProxyManagerClient.GetProxyIndex(proxy);
+            if (containerId == null || !index.HasValue)
+                continue;
+
+            var containerName = _containerNames.GetValueOrDefault(containerId) ?? string.Empty;
+            var existing = _settings.GetRouteOverride(containerId, containerName, index.Value);
+            if (existing == null)
+            {
+                _settings.UpsertRouteOverride(containerId, containerName, index.Value, fromNpm);
+                continue;
+            }
+
+            RouteOverrideMeta.MergeMissingFields(existing, fromNpm);
+            _settings.UpsertRouteOverride(containerId, containerName, index.Value, existing);
+        }
+    }
+
+    private void AttachRouteOverrideMeta(ProxyHostRequest request, string containerId, int index, ProxyHost? npmHost)
+    {
+        var containerName = _containerNames.GetValueOrDefault(containerId);
+        var overrideData = _settings.GetRouteOverride(containerId, containerName, index);
+        if (overrideData == null && npmHost != null)
+            overrideData = RouteOverrideMeta.TryParse(npmHost);
+
+        if (overrideData != null)
+            RouteOverrideMeta.Attach(request.Meta, overrideData);
+    }
+
+    private async Task MergeManualRouteConfigsAsync(
+        string containerId,
+        string containerName,
+        Dictionary<int, ProxyConfiguration> proxyConfigs,
+        CancellationToken cancellationToken)
+    {
+        foreach (var index in _settings.ListOverrideIndices(containerId, containerName))
+        {
+            var ov = _settings.GetRouteOverride(containerId, containerName, index);
+            if (ov?.Manual != true || proxyConfigs.ContainsKey(index))
+                continue;
+
+            proxyConfigs[index] = await BuildManualProxyConfigurationAsync(
+                containerId, containerName, index, ov, cancellationToken);
+        }
+    }
+
+    private async Task<ProxyConfiguration> BuildManualProxyConfigurationAsync(
+        string containerId,
+        string containerName,
+        int index,
+        RouteOverride ov,
+        CancellationToken cancellationToken)
+    {
+        var config = new ProxyConfiguration
+        {
+            Index = index,
+            DomainNames = ov.Domains?.ToList() ?? new List<string>(),
+            ForwardScheme = ov.ForwardScheme ?? "http",
+            ForwardHost = ov.ForwardHost ?? string.Empty,
+            ForwardPort = ov.ForwardPort,
+            LabelSource = ProxyLabelSource.Npm,
+            Homepage = new HomepageInfo { Name = ov.DisplayName ?? containerName, Show = true },
+        };
+
+        ApplyRouteOverride(containerId, containerName, index, config);
+
+        if (string.IsNullOrWhiteSpace(config.ForwardHost))
+            config.ForwardHost = await _networkService.InferForwardHost(containerId, null, cancellationToken);
+
+        if (!config.ForwardPort.HasValue)
+            config.ForwardPort = await _networkService.InferForwardPort(containerId, cancellationToken);
+
+        return config;
+    }
+
+    public async Task<RouteInfo> CreateManualRouteAsync(
+        string containerId,
+        RouteOverride initial,
+        CancellationToken cancellationToken)
+    {
+        await EnsureInstanceIdAsync(cancellationToken);
+
+        var container = await _dockerClient.Containers.InspectContainerAsync(containerId, cancellationToken);
+        var containerName = container.Name.TrimStart('/');
+
+        if (initial.Domains == null || initial.Domains.Count == 0)
+            throw new ArgumentException("At least one domain is required");
+
+        var indices = _settings.ListOverrideIndices(containerId, containerName);
+        var labelConfigs = _labelParser.ParseLabels(container.Config?.Labels ?? new Dictionary<string, string>());
+        var nextIndex = indices
+            .Concat(labelConfigs.Keys)
+            .DefaultIfEmpty(-1)
+            .Max() + 1;
+
+        var index = nextIndex;
+        var stored = new RouteOverride { Manual = true };
+        MergeOverride(stored, initial);
+        stored.Manual = true;
+
+        _settings.UpsertRouteOverride(containerId, containerName, index, stored);
+        _containerLabelHashes.TryRemove(containerId, out _);
+        InvalidateRoutesCache();
+
+        var labels = container.Config?.Labels ?? new Dictionary<string, string>();
+        await ProcessContainer(containerId, containerName, labels, cancellationToken);
+
+        var route = await GetRouteDetailAsync(containerId, index, cancellationToken);
+        if (route == null)
+            throw new InvalidOperationException("Manual route was created but is not visible in the dashboard");
+
+        return route;
+    }
+
+    public async Task<List<RouteContainerInfo>> ListRouteContainersAsync(CancellationToken cancellationToken)
+    {
+        var containers = await _dockerClient.Containers.ListContainersAsync(
+            new ContainersListParameters { All = false },
+            cancellationToken);
+
+        return containers
+            .Select(c =>
+            {
+                var name = c.Names.FirstOrDefault()?.TrimStart('/') ?? c.ID[..Math.Min(12, c.ID.Length)];
+                var labels = c.Labels ?? new Dictionary<string, string>();
+                return new RouteContainerInfo
+                {
+                    Id = c.ID,
+                    Name = name,
+                    Image = c.Image,
+                    HasSyncLabels = HasSyncLabels(labels),
+                };
+            })
+            .OrderBy(c => c.Name, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    public async Task<AdoptOrphansResult> AdoptOrphanHostsByDomainAsync(CancellationToken cancellationToken)
+    {
+        await EnsureInstanceIdAsync(cancellationToken);
+
+        var result = new AdoptOrphansResult();
+        var allProxies = await _npmClient.GetProxyHostsAsync(cancellationToken);
+        var managed = allProxies
+            .Where(p => NginxProxyManagerClient.IsAutomationManaged(p, _instanceId!))
+            .ToList();
+
+        var running = await _dockerClient.Containers.ListContainersAsync(
+            new ContainersListParameters { All = false },
+            cancellationToken);
+
+        var domainToTarget = new Dictionary<string, (string ContainerId, int Index)>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var container in running)
+        {
+            var containerId = container.ID;
+            var containerName = container.Names.FirstOrDefault()?.TrimStart('/') ?? containerId[..12];
+            var labels = container.Labels ?? new Dictionary<string, string>();
+
+            if (MatchesNeverBridgeKeywords(containerName, container.Image) && !HasSyncLabels(labels))
+                continue;
+
+            var configs = _labelParser.ParseLabels(labels);
+            if (configs.Count == 0 && !_labelParser.IsExcluded(labels))
+            {
+                var auto = await TryBuildAutoBridgeConfigAsync(containerId, containerName, labels, cancellationToken);
+                if (auto != null)
+                    configs[0] = auto;
+            }
+
+            await MergeManualRouteConfigsAsync(containerId, containerName, configs, cancellationToken);
+
+            foreach (var (index, config) in configs)
+            {
+                ApplyRouteOverride(containerId, containerName, index, config);
+                foreach (var domain in config.DomainNames)
+                {
+                    if (string.IsNullOrWhiteSpace(domain))
+                        continue;
+
+                    if (domainToTarget.TryGetValue(domain, out var existing) &&
+                        !existing.ContainerId.Equals(containerId, StringComparison.OrdinalIgnoreCase))
+                    {
+                        result.Skipped.Add($"Domain {domain} is claimed by multiple running containers");
+                        continue;
+                    }
+
+                    domainToTarget[domain] = (containerId, index);
+                }
+            }
+        }
+
+        var containersToSync = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var proxy in managed)
+        {
+            var ownerId = NginxProxyManagerClient.GetManagedContainerId(proxy);
+            var proxyIndex = NginxProxyManagerClient.GetProxyIndex(proxy) ?? 0;
+            var domains = proxy.DomainNames ?? new List<string>();
+            if (domains.Count == 0)
+            {
+                result.Skipped.Add($"Host {proxy.Id} has no domains");
+                continue;
+            }
+
+            var ownerRunning = !string.IsNullOrEmpty(ownerId) &&
+                               running.Any(c => c.ID.Equals(ownerId, StringComparison.OrdinalIgnoreCase));
+
+            (string ContainerId, int Index)? target = null;
+            foreach (var domain in domains)
+            {
+                if (domainToTarget.TryGetValue(domain, out var t))
+                {
+                    target = t;
+                    break;
+                }
+            }
+
+            if (target == null)
+            {
+                if (!ownerRunning)
+                    result.Skipped.Add($"Host {proxy.Id} ({string.Join(", ", domains)}): no running container owns these domains");
+                continue;
+            }
+
+            var (targetId, targetIndex) = target.Value;
+            var proxyKey = $"{targetId}:{targetIndex}";
+
+            if (ownerRunning &&
+                ownerId != null &&
+                ownerId.Equals(targetId, StringComparison.OrdinalIgnoreCase) &&
+                proxyIndex == targetIndex &&
+                _containerProxyMap.TryGetValue(proxyKey, out var mapped) &&
+                mapped == proxy.Id)
+            {
+                continue;
+            }
+
+            _containerProxyMap[proxyKey] = proxy.Id;
+            containersToSync.Add(targetId);
+            result.Adopted.Add(new AdoptedOrphanEntry
+            {
+                NpmHostId = proxy.Id,
+                Domains = domains,
+                ContainerId = targetId,
+                ContainerName = running.First(c => c.ID == targetId).Names.FirstOrDefault()?.TrimStart('/') ?? targetId[..12],
+                ProxyIndex = targetIndex,
+                PreviousContainerId = ownerId,
+            });
+
+            _logger.LogInformation(
+                "Adopted NPM host {HostId} [{Domains}] → container {ContainerId} proxy {Index}",
+                proxy.Id, string.Join(", ", domains), targetId, targetIndex);
+        }
+
+        foreach (var containerId in containersToSync)
+        {
+            try
+            {
+                _containerLabelHashes.TryRemove(containerId, out _);
+                await SyncNowAsync(containerId, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                result.Skipped.Add($"Re-sync failed for {containerId}: {ex.Message}");
+            }
+        }
+
+        InvalidateRoutesCache();
+        return result;
     }
 
     private async Task EnsureInstanceIdAsync(CancellationToken cancellationToken)
@@ -1533,6 +1988,30 @@ public class RouteInfo
     public string? KomodoUrl { get; set; }
     public string? KomodoResourceType { get; set; }
     public string? KomodoResourceName { get; set; }
+}
+
+public class RouteContainerInfo
+{
+    public string Id { get; set; } = string.Empty;
+    public string Name { get; set; } = string.Empty;
+    public string? Image { get; set; }
+    public bool HasSyncLabels { get; set; }
+}
+
+public class AdoptedOrphanEntry
+{
+    public int NpmHostId { get; set; }
+    public List<string> Domains { get; set; } = new();
+    public string ContainerId { get; set; } = string.Empty;
+    public string ContainerName { get; set; } = string.Empty;
+    public int ProxyIndex { get; set; }
+    public string? PreviousContainerId { get; set; }
+}
+
+public class AdoptOrphansResult
+{
+    public List<AdoptedOrphanEntry> Adopted { get; set; } = new();
+    public List<string> Skipped { get; set; } = new();
 }
 
 public class DashboardStats

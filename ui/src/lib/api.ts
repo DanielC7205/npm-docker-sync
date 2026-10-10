@@ -165,6 +165,38 @@ export const syncRoute = (containerId: string) =>
     method: 'POST',
   })
 
+export interface RouteContainerInfo {
+  id: string
+  name: string
+  image?: string | null
+  hasSyncLabels: boolean
+}
+
+export interface AdoptedOrphanEntry {
+  npmHostId: number
+  domains: string[]
+  containerId: string
+  containerName: string
+  proxyIndex: number
+  previousContainerId?: string | null
+}
+
+export interface AdoptOrphansResult {
+  adopted: AdoptedOrphanEntry[]
+  skipped: string[]
+}
+
+export const fetchContainers = () => api<RouteContainerInfo[]>('/api/containers')
+
+export const createManualRoute = (containerId: string, body: Record<string, unknown>) =>
+  api<RouteInfo>(`/api/routes/${encodeURIComponent(containerId)}`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+
+export const adoptOrphanHosts = () =>
+  api<AdoptOrphansResult>('/api/routes/adopt-orphans', { method: 'POST' })
+
 export const testUpstream = (
   containerId: string,
   index: number,

@@ -169,7 +169,7 @@ export function RouteEditDialog({
     setError(null)
     try {
       const selectedCert = certId ? Number(certId) : null
-      await patchRoute(route!.containerId, route!.index, {
+      const body: Record<string, unknown> = {
         displayName: displayName.trim() || null,
         domains: domainList,
         hidden,
@@ -180,12 +180,14 @@ export function RouteEditDialog({
         http2Support: http2,
         hstsEnabled: hsts,
         allowWebsocketUpgrade: websockets,
-        certificateId: selectedCert && selectedCert > 0 ? selectedCert : 0,
         authRequest: authExempt ? 'none' : authRequest,
         authExempt,
         icon: icon.trim() ? normalizeIconInput(icon) : '',
         locations,
-      })
+      }
+      if (selectedCert && selectedCert > 0)
+        body.certificateId = selectedCert
+      await patchRoute(route!.containerId, route!.index, body)
       onOpenChange(false)
       onSaved()
     } catch (e) {
