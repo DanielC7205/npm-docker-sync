@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { KeyRound, LogIn } from 'lucide-react'
-import { Button } from '@/components/ui/button'
+import { Button, buttonVariants } from '@/components/ui/button'
 import {
   Card,
   CardContent,
@@ -59,12 +59,13 @@ export function LoginForm({
           <FieldGroup>
             {showOidc && (
               <Field>
-                <Button variant="default" className="w-full gap-2" asChild>
-                  <a href="/api/auth/login">
-                    <LogIn className="size-4" />
-                    Sign in with OIDC
-                  </a>
-                </Button>
+                <a
+                  href="/api/auth/login"
+                  className={cn(buttonVariants({ variant: 'default' }), 'h-9 w-full gap-2')}
+                >
+                  <LogIn className="size-4" />
+                  Sign in with OIDC
+                </a>
                 <FieldDescription className="text-center text-xs">
                   Requires <code className="text-[11px]">OIDC_AUTHORITY</code> and{' '}
                   <code className="text-[11px]">OIDC_CLIENT_ID</code> (env or Settings).

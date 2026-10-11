@@ -20,11 +20,9 @@ function isSessionAllowed(auth: AuthStatus | null): boolean {
 function Shell({
   children,
   auth,
-  onAuthRefresh,
 }: {
   children: ReactNode
   auth: AuthStatus | null
-  onAuthRefresh: () => void
 }) {
   const loc = useLocation()
   const [menuOpen, setMenuOpen] = useState(false)
@@ -212,7 +210,7 @@ export default function App() {
   }, [refreshAuth, loc.pathname])
 
   return (
-    <Shell auth={auth} onAuthRefresh={refreshAuth}>
+    <Shell auth={auth}>
       <RequireAuth auth={auth}>
         <Routes>
           <Route path="/" element={<AppsPage />} />
