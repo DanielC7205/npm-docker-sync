@@ -67,6 +67,7 @@ export interface DashboardStats {
 export interface AuthStatus {
   authConfigured: boolean
   oidcConfigured: boolean
+  tokenAuthConfigured?: boolean
   authenticated: boolean
   name?: string | null
 }

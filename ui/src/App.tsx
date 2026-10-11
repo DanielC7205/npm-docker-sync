@@ -1,8 +1,9 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import { Link, Navigate, Route, Routes, useLocation } from 'react-router-dom'
-import { Boxes, LayoutGrid, LogIn, Menu, Network, Settings as SettingsIcon, X } from 'lucide-react'
+import { Boxes, LayoutGrid, LogIn, LogOut, Menu, Network, Settings as SettingsIcon, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { fetchAuthStatus, type AuthStatus } from '@/lib/api'
+import { hasStoredWebUiToken, setStoredWebUiToken } from '@/lib/auth'
 import { cn } from '@/lib/utils'
 import { AppsPage } from '@/pages/AppsPage'
 import { SettingsPage } from '@/pages/SettingsPage'
@@ -10,7 +11,21 @@ import { TunnelsPage } from '@/pages/TunnelsPage'
 import { LoginPage } from '@/pages/LoginPage'
 import { UnavailablePage } from '@/pages/UnavailablePage'
 
-function Shell({ children, auth }: { children: ReactNode; auth: AuthStatus | null }) {
+function isSessionAllowed(auth: AuthStatus | null): boolean {
+  if (!auth?.authConfigured) return true
+  if (auth.authenticated) return true
+  return hasStoredWebUiToken()
+}
+
+function Shell({
+  children,
+  auth,
+  onAuthRefresh,
+}: {
+  children: ReactNode
+  auth: AuthStatus | null
+  onAuthRefresh: () => void
+}) {
   const loc = useLocation()
   const [menuOpen, setMenuOpen] = useState(false)
   const nav = [
@@ -23,7 +38,6 @@ function Shell({ children, auth }: { children: ReactNode; auth: AuthStatus | nul
     setMenuOpen(false)
   }, [loc.pathname])
 
-  // Public unavailable page: minimal chrome
   if (loc.pathname === '/unavailable') {
     return (
       <div className="min-h-screen bg-background text-foreground">
@@ -31,6 +45,16 @@ function Shell({ children, auth }: { children: ReactNode; auth: AuthStatus | nul
       </div>
     )
   }
+
+  if (loc.pathname === '/login') {
+    return (
+      <div className="min-h-screen bg-background text-foreground">
+        <main className="mx-auto max-w-6xl px-4 py-6">{children}</main>
+      </div>
+    )
+  }
+
+  const showSignIn = auth?.authConfigured && !isSessionAllowed(auth)
 
   return (
     <div className="min-h-screen bg-background text-foreground">
@@ -44,7 +68,6 @@ function Shell({ children, auth }: { children: ReactNode; auth: AuthStatus | nul
             </span>
           </div>
 
-          {/* Desktop nav */}
           <nav className="hidden items-center gap-1 md:flex">
             {nav.map((item) => {
               const Icon = item.icon
@@ -61,20 +84,38 @@ function Shell({ children, auth }: { children: ReactNode; auth: AuthStatus | nul
             <a href="https://github.com/DanielC7205/npm-docker-sync" target="_blank" rel="noreferrer">
               <Button variant="ghost" size="sm">Docs</Button>
             </a>
-            {auth?.oidcConfigured && !auth.authenticated && (
-              <a href="/api/auth/login">
+            {showSignIn ? (
+              <Link to="/login">
                 <Button size="sm" className="gap-1.5">
                   <LogIn className="size-4" />
-                  Login
+                  Sign in
                 </Button>
-              </a>
-            )}
-            {auth?.authenticated && (
-              <span className="ml-2 max-w-[10rem] truncate text-xs text-muted-foreground">{auth.name}</span>
-            )}
+              </Link>
+            ) : auth?.authenticated ? (
+              <>
+                <span className="ml-2 max-w-[10rem] truncate text-xs text-muted-foreground">{auth.name}</span>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="gap-1.5"
+                  onClick={() => {
+                    setStoredWebUiToken('')
+                    window.location.href = '/api/auth/logout'
+                  }}
+                >
+                  <LogOut className="size-4" />
+                  Log out
+                </Button>
+              </>
+            ) : auth?.authConfigured && hasStoredWebUiToken() ? (
+              <Link to="/login">
+                <Button variant="ghost" size="sm" className="text-xs text-muted-foreground">
+                  Token session
+                </Button>
+              </Link>
+            ) : null}
           </nav>
 
-          {/* Mobile menu button */}
           <Button
             type="button"
             variant="outline"
@@ -87,7 +128,6 @@ function Shell({ children, auth }: { children: ReactNode; auth: AuthStatus | nul
           </Button>
         </div>
 
-        {/* Mobile drawer */}
         {menuOpen && (
           <div className="border-t md:hidden">
             <nav className="mx-auto flex max-w-6xl flex-col gap-1 px-4 py-3">
@@ -109,17 +149,16 @@ function Shell({ children, auth }: { children: ReactNode; auth: AuthStatus | nul
               <a href="https://github.com/DanielC7205/npm-docker-sync" target="_blank" rel="noreferrer">
                 <Button variant="ghost" className="h-11 w-full justify-start">Docs</Button>
               </a>
-              {auth?.oidcConfigured && !auth.authenticated && (
-                <a href="/api/auth/login">
+              {showSignIn ? (
+                <Link to="/login">
                   <Button className="h-11 w-full justify-start gap-2">
                     <LogIn className="size-4" />
-                    Login
+                    Sign in
                   </Button>
-                </a>
-              )}
-              {auth?.authenticated && (
+                </Link>
+              ) : auth?.authenticated ? (
                 <p className="px-3 py-2 text-xs text-muted-foreground">{auth.name}</p>
-              )}
+              ) : null}
             </nav>
           </div>
         )}
@@ -129,27 +168,61 @@ function Shell({ children, auth }: { children: ReactNode; auth: AuthStatus | nul
   )
 }
 
+function RequireAuth({
+  auth,
+  children,
+}: {
+  auth: AuthStatus | null
+  children: ReactNode
+}) {
+  const loc = useLocation()
+  if (loc.pathname === '/login' || loc.pathname === '/unavailable') {
+    return children
+  }
+  if (auth === null) {
+    return (
+      <div className="py-12 text-center text-sm text-muted-foreground">Checking session…</div>
+    )
+  }
+
+  if (auth.authConfigured && !isSessionAllowed(auth)) {
+    return <Navigate to="/login" replace state={{ from: loc.pathname }} />
+  }
+  return children
+}
+
 export default function App() {
   const [auth, setAuth] = useState<AuthStatus | null>(null)
+  const loc = useLocation()
 
-  useEffect(() => {
-    void fetchAuthStatus().then(setAuth).catch(() => setAuth({
-      authConfigured: false,
-      oidcConfigured: false,
-      authenticated: false,
-    }))
+  const refreshAuth = useCallback(() => {
+    void fetchAuthStatus()
+      .then(setAuth)
+      .catch(() =>
+        setAuth({
+          authConfigured: false,
+          oidcConfigured: false,
+          authenticated: false,
+        }),
+      )
   }, [])
 
+  useEffect(() => {
+    refreshAuth()
+  }, [refreshAuth, loc.pathname])
+
   return (
-    <Shell auth={auth}>
-      <Routes>
-        <Route path="/" element={<AppsPage />} />
-        <Route path="/tunnels" element={<TunnelsPage />} />
-        <Route path="/settings" element={<SettingsPage auth={auth} />} />
-        <Route path="/login" element={<LoginPage auth={auth} />} />
-        <Route path="/unavailable" element={<UnavailablePage />} />
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
+    <Shell auth={auth} onAuthRefresh={refreshAuth}>
+      <RequireAuth auth={auth}>
+        <Routes>
+          <Route path="/" element={<AppsPage />} />
+          <Route path="/tunnels" element={<TunnelsPage />} />
+          <Route path="/settings" element={<SettingsPage auth={auth} />} />
+          <Route path="/login" element={<LoginPage auth={auth} onAuthRefresh={refreshAuth} />} />
+          <Route path="/unavailable" element={<UnavailablePage />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </RequireAuth>
     </Shell>
   )
 }

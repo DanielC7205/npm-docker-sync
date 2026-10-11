@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authentication.OpenIdConnect;
 using Microsoft.Extensions.FileProviders;
+using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Protocols.OpenIdConnect;
 using NpmDockerSync.Services;
 using Serilog;
@@ -97,48 +98,10 @@ var authBuilder = builder.Services.AddAuthentication(options =>
         options.LoginPath = "/login";
     });
 
-{
-    var oidcAuthority = builder.Configuration["OIDC_AUTHORITY"];
-    var oidcClientId = builder.Configuration["OIDC_CLIENT_ID"];
-    if (!string.IsNullOrWhiteSpace(oidcAuthority) && !string.IsNullOrWhiteSpace(oidcClientId))
-    {
-        authBuilder.AddOpenIdConnect(OpenIdConnectDefaults.AuthenticationScheme, options =>
-        {
-            options.Authority = oidcAuthority;
-            options.ClientId = oidcClientId!;
-            options.ClientSecret = builder.Configuration["OIDC_CLIENT_SECRET"];
-            options.ResponseType = OpenIdConnectResponseType.Code;
-            options.UsePkce = true;
-            options.SaveTokens = true;
-            options.GetClaimsFromUserInfoEndpoint = true;
-            options.CallbackPath = builder.Configuration["OIDC_CALLBACK_PATH"] ?? "/signin-oidc";
-            options.SignInScheme = CookieAuthenticationDefaults.AuthenticationScheme;
-            options.Events = new OpenIdConnectEvents
-            {
-                OnRedirectToIdentityProvider = ctx =>
-                {
-                    var store = ctx.HttpContext.RequestServices.GetRequiredService<SettingsStore>();
-                    var publicBase = store.GetWebUiPublicBaseUrl();
-                    if (!string.IsNullOrWhiteSpace(publicBase))
-                        ctx.ProtocolMessage.RedirectUri = $"{publicBase.TrimEnd('/')}{options.CallbackPath}";
-                    return Task.CompletedTask;
-                },
-            };
-            var scopes = (builder.Configuration["OIDC_SCOPES"] ?? "openid profile email")
-                .Split(' ', StringSplitOptions.RemoveEmptyEntries);
-            options.Scope.Clear();
-            foreach (var s in scopes)
-                options.Scope.Add(s);
-        });
+authBuilder.AddOpenIdConnect(OpenIdConnectDefaults.AuthenticationScheme, _ => { });
+builder.Services.AddSingleton<IConfigureOptions<OpenIdConnectOptions>, OpenIdConnectSettingsConfigurator>();
 
-        builder.Services.PostConfigure<AuthenticationOptions>(options =>
-        {
-            options.DefaultChallengeScheme = OpenIdConnectDefaults.AuthenticationScheme;
-        });
-    }
-
-    builder.Services.AddAuthorization();
-}
+builder.Services.AddAuthorization();
 
 var app = builder.Build();
 
@@ -190,12 +153,19 @@ app.MapGet("/api/health", () => Results.Ok(new { status = "ok" }));
 
 app.MapGet("/api/auth/status", (SettingsStore settings, HttpContext ctx) =>
 {
+    var bearer = ctx.Request.Headers.Authorization.ToString();
+    var webToken = settings.Get("WEB_UI_TOKEN");
+    var tunnelToken = settings.Get("TUNNEL_API_TOKEN");
+    var bearerOk = (!string.IsNullOrEmpty(webToken) && bearer.Equals($"Bearer {webToken}", StringComparison.Ordinal))
+                   || (!string.IsNullOrEmpty(tunnelToken) && bearer.Equals($"Bearer {tunnelToken}", StringComparison.Ordinal));
+
     return Results.Ok(new
     {
         authConfigured = settings.IsAuthConfigured(),
         oidcConfigured = settings.IsOidcConfigured(),
-        authenticated = ctx.User.Identity?.IsAuthenticated == true,
-        name = ctx.User.Identity?.Name,
+        tokenAuthConfigured = !string.IsNullOrWhiteSpace(webToken),
+        authenticated = ctx.User.Identity?.IsAuthenticated == true || bearerOk,
+        name = ctx.User.Identity?.IsAuthenticated == true ? ctx.User.Identity?.Name : null,
     });
 });
 
