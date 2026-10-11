@@ -102,6 +102,8 @@ var authBuilder = builder.Services.AddAuthentication(options =>
 using (var bootstrap = builder.Services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = false }))
 {
     var bootstrapSettings = bootstrap.GetRequiredService<SettingsStore>();
+    var hasAuthority = !string.IsNullOrWhiteSpace(bootstrapSettings.Get("OIDC_AUTHORITY"));
+    var hasClientId = !string.IsNullOrWhiteSpace(bootstrapSettings.Get("OIDC_CLIENT_ID"));
     if (bootstrapSettings.IsOidcConfigured())
     {
         authBuilder.AddOpenIdConnect(OpenIdConnectDefaults.AuthenticationScheme, _ => { });
@@ -110,12 +112,13 @@ using (var bootstrap = builder.Services.BuildServiceProvider(new ServiceProvider
         {
             options.DefaultChallengeScheme = OpenIdConnectDefaults.AuthenticationScheme;
         });
-        Log.Information("OIDC authentication enabled (authority + client id configured)");
+        Log.Information("OIDC authentication enabled (authority and client id resolved from env and/or SQLite)");
     }
-    else if (!string.IsNullOrWhiteSpace(bootstrapSettings.Get("OIDC_AUTHORITY")))
+    else if (hasAuthority && !hasClientId)
     {
         Log.Warning(
-            "OIDC_AUTHORITY is set but OIDC_CLIENT_ID is missing — OIDC login is disabled until both are configured");
+            "OIDC_AUTHORITY is set but OIDC_CLIENT_ID is empty after merging SQLite and environment — " +
+            "OIDC login disabled. If CLIENT_ID is only in env, clear blank OIDC_* rows in app_settings or redeploy after this fix.");
     }
 }
 

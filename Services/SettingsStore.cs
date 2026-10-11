@@ -198,7 +198,8 @@ public class SettingsStore
             cmd.CommandText = "SELECT value FROM app_settings WHERE key = $k";
             cmd.Parameters.AddWithValue("$k", key);
             var result = cmd.ExecuteScalar() as string;
-            if (result != null)
+            // Empty SQLite rows must not block environment variables (common after saving Settings with blank OIDC fields).
+            if (!string.IsNullOrWhiteSpace(result))
                 return result;
         }
 
@@ -301,7 +302,7 @@ public class SettingsStore
                 if (SecretKeys.Contains(key) && string.IsNullOrWhiteSpace(value))
                     continue;
 
-                if (value == null)
+                if (string.IsNullOrWhiteSpace(value))
                 {
                     using var del = conn.CreateCommand();
                     del.Transaction = tx;
