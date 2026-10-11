@@ -3,6 +3,7 @@ using Docker.DotNet;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authentication.OpenIdConnect;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Protocols.OpenIdConnect;
@@ -88,6 +89,29 @@ builder.Services.AddHostedService<DockerMonitorService>();
 builder.Services.AddHostedService<NpmMirrorSyncService>();
 builder.Services.AddHostedService<TunnelCleanupService>();
 
+builder.Services.Configure<ForwardedHeadersOptions>(options =>
+{
+    options.ForwardedHeaders = ForwardedHeaders.XForwardedFor
+                               | ForwardedHeaders.XForwardedProto
+                               | ForwardedHeaders.XForwardedHost;
+    options.KnownNetworks.Clear();
+    options.KnownProxies.Clear();
+});
+
+builder.Services.AddHttpClient(OpenIdConnectSettingsConfigurator.BackchannelHttpClientName)
+    .ConfigurePrimaryHttpMessageHandler(sp =>
+    {
+        var settings = sp.GetRequiredService<SettingsStore>();
+        var handler = new HttpClientHandler { AllowAutoRedirect = true };
+        if (settings.GetBool("NPM_TLS_SKIP_VERIFY") || settings.GetBool("OIDC_TLS_SKIP_VERIFY"))
+        {
+            handler.ServerCertificateCustomValidationCallback =
+                HttpClientHandler.DangerousAcceptAnyServerCertificateValidator;
+        }
+
+        return handler;
+    });
+
 var authBuilder = builder.Services.AddAuthentication(options =>
     {
         options.DefaultScheme = CookieAuthenticationDefaults.AuthenticationScheme;
@@ -108,6 +132,7 @@ using (var bootstrap = builder.Services.BuildServiceProvider(new ServiceProvider
     {
         authBuilder.AddOpenIdConnect(OpenIdConnectDefaults.AuthenticationScheme, _ => { });
         builder.Services.AddSingleton<IConfigureOptions<OpenIdConnectOptions>, OpenIdConnectSettingsConfigurator>();
+        builder.Services.AddHostedService<OidcMetadataStartupCheck>();
         builder.Services.PostConfigure<AuthenticationOptions>(options =>
         {
             options.DefaultChallengeScheme = OpenIdConnectDefaults.AuthenticationScheme;
@@ -127,6 +152,8 @@ builder.Services.AddAuthorization();
 var app = builder.Build();
 
 var settingsStore = app.Services.GetRequiredService<SettingsStore>();
+
+app.UseForwardedHeaders();
 
 app.UseAuthentication();
 app.UseAuthorization();
