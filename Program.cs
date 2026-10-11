@@ -98,8 +98,26 @@ var authBuilder = builder.Services.AddAuthentication(options =>
         options.LoginPath = "/login";
     });
 
-authBuilder.AddOpenIdConnect(OpenIdConnectDefaults.AuthenticationScheme, _ => { });
-builder.Services.AddSingleton<IConfigureOptions<OpenIdConnectOptions>, OpenIdConnectSettingsConfigurator>();
+// OpenIdConnect validates ClientId on every request when the scheme is registered — only add it when fully configured.
+using (var bootstrap = builder.Services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = false }))
+{
+    var bootstrapSettings = bootstrap.GetRequiredService<SettingsStore>();
+    if (bootstrapSettings.IsOidcConfigured())
+    {
+        authBuilder.AddOpenIdConnect(OpenIdConnectDefaults.AuthenticationScheme, _ => { });
+        builder.Services.AddSingleton<IConfigureOptions<OpenIdConnectOptions>, OpenIdConnectSettingsConfigurator>();
+        builder.Services.PostConfigure<AuthenticationOptions>(options =>
+        {
+            options.DefaultChallengeScheme = OpenIdConnectDefaults.AuthenticationScheme;
+        });
+        Log.Information("OIDC authentication enabled (authority + client id configured)");
+    }
+    else if (!string.IsNullOrWhiteSpace(bootstrapSettings.Get("OIDC_AUTHORITY")))
+    {
+        Log.Warning(
+            "OIDC_AUTHORITY is set but OIDC_CLIENT_ID is missing — OIDC login is disabled until both are configured");
+    }
+}
 
 builder.Services.AddAuthorization();
 
@@ -183,7 +201,13 @@ app.MapGet("/api/auth/me", (HttpContext ctx) =>
 app.MapGet("/api/auth/login", async (HttpContext ctx, SettingsStore settings) =>
 {
     if (!settings.IsOidcConfigured())
-        return Results.BadRequest(new { error = "OIDC is not configured" });
+    {
+        var msg = !string.IsNullOrWhiteSpace(settings.Get("OIDC_AUTHORITY"))
+            ? "OIDC_CLIENT_ID is required (set env or Settings, then restart the container)"
+            : "OIDC is not configured";
+        return Results.BadRequest(new { error = msg });
+    }
+
     await ctx.ChallengeAsync(OpenIdConnectDefaults.AuthenticationScheme, new AuthenticationProperties
     {
         RedirectUri = "/",
