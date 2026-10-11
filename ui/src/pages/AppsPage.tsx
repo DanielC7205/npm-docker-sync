@@ -11,12 +11,22 @@ import {
   RefreshCw,
   Search,
   Server,
+  SlidersHorizontal,
 } from 'lucide-react'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
 import {
   adoptOrphanHosts,
@@ -27,6 +37,14 @@ import {
   type RouteInfo,
   type RouteStatus,
 } from '@/lib/api'
+import {
+  countHiddenByVisibility,
+  DEFAULT_ROUTE_VISIBILITY,
+  loadRouteVisibilityPrefs,
+  routeMatchesVisibility,
+  saveRouteVisibilityPrefs,
+  type RouteVisibilityPrefs,
+} from '@/lib/appsRouteVisibility'
 import { cn, formatUptime } from '@/lib/utils'
 import { AddRouteDialog } from '@/components/AddRouteDialog'
 import { RouteEditDialog } from '@/components/RouteEditDialog'
@@ -74,6 +92,8 @@ export function AppsPage() {
   const [editRoute, setEditRoute] = useState<RouteInfo | null>(null)
   const [addOpen, setAddOpen] = useState(false)
   const [adoptMsg, setAdoptMsg] = useState<string | null>(null)
+  const [visibilityOpen, setVisibilityOpen] = useState(false)
+  const [visibility, setVisibility] = useState<RouteVisibilityPrefs>(() => loadRouteVisibilityPrefs())
 
   const load = useCallback(async () => {
     try {
@@ -96,15 +116,20 @@ export function AppsPage() {
 
   const hiddenCount = useMemo(() => routes.filter((r) => r.hidden).length, [routes])
 
+  const hiddenByVisibilityCount = useMemo(
+    () => countHiddenByVisibility(routes, visibility),
+    [routes, visibility],
+  )
+
   const filtered = useMemo(() => {
     return routes.filter((r) => {
+      if (!routeMatchesVisibility(r, visibility, filter)) return false
+
       if (filter === 'hidden') {
         if (!r.hidden) return false
       } else if (r.hidden) {
         return false
       }
-
-      if (filter !== 'disabled' && r.status === 'Disabled') return false
 
       if (filter === 'synced' && r.status !== 'Synced') return false
       if (filter === 'missing' && r.status !== 'Missing') return false
@@ -119,7 +144,20 @@ export function AppsPage() {
         r.domains.some((d) => d.toLowerCase().includes(q))
       )
     })
-  }, [routes, filter, search])
+  }, [routes, filter, search, visibility])
+
+  function updateVisibility(patch: Partial<RouteVisibilityPrefs>) {
+    setVisibility((prev) => {
+      const next = { ...prev, ...patch }
+      saveRouteVisibilityPrefs(next)
+      return next
+    })
+  }
+
+  function resetVisibility() {
+    setVisibility({ ...DEFAULT_ROUTE_VISIBILITY })
+    saveRouteVisibilityPrefs(DEFAULT_ROUTE_VISIBILITY)
+  }
 
   async function onToggle(route: RouteInfo, enabled: boolean) {
     const key = `${route.containerId}:${route.index}`
@@ -241,11 +279,73 @@ export function AppsPage() {
             {f.label}
           </Button>
         ))}
-        <div className="relative ml-auto w-full max-w-xs">
-          <Search className="pointer-events-none absolute top-2.5 left-2.5 size-4 text-muted-foreground" />
-          <Input className="pl-8" placeholder="Search…" value={search} onChange={(e) => setSearch(e.target.value)} />
+        <div className="ml-auto flex w-full max-w-md items-center gap-2">
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="shrink-0 gap-1.5"
+            onClick={() => setVisibilityOpen(true)}
+          >
+            <SlidersHorizontal className="size-4" />
+            Display
+            {hiddenByVisibilityCount > 0 && (
+              <Badge variant="secondary" className="ml-0.5 px-1.5 py-0 text-[10px]">
+                {hiddenByVisibilityCount}
+              </Badge>
+            )}
+          </Button>
+          <div className="relative min-w-0 flex-1">
+            <Search className="pointer-events-none absolute top-2.5 left-2.5 size-4 text-muted-foreground" />
+            <Input className="pl-8" placeholder="Search…" value={search} onChange={(e) => setSearch(e.target.value)} />
+          </div>
         </div>
       </div>
+
+      <Dialog open={visibilityOpen} onOpenChange={setVisibilityOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Display filters</DialogTitle>
+            <DialogDescription>
+              Control which services appear in the list. Saved in this browser. Excluded and conflict entries are hidden by default.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-1">
+            <VisibilityRow
+              label="Excluded"
+              description="Never-bridge list and proxy.exclude (npmplus, npm-docker-sync, etc.)."
+              checked={visibility.showExcluded}
+              onCheckedChange={(v) => updateVisibility({ showExcluded: v })}
+            />
+            <VisibilityRow
+              label="Conflicts"
+              description="Domain exists in NPM but is not managed by this sync instance."
+              checked={visibility.showConflict}
+              onCheckedChange={(v) => updateVisibility({ showConflict: v })}
+            />
+            <VisibilityRow
+              label="Disabled"
+              description="Show disabled / unavailable routes on tabs other than Disabled."
+              checked={visibility.showDisabled}
+              onCheckedChange={(v) => updateVisibility({ showDisabled: v })}
+            />
+            <VisibilityRow
+              label="Auto-bridged"
+              description="Routes created automatically from exposed ports and base domain."
+              checked={visibility.showAutoBridgeOnly}
+              onCheckedChange={(v) => updateVisibility({ showAutoBridgeOnly: v })}
+            />
+          </div>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={resetVisibility}>
+              Reset defaults
+            </Button>
+            <Button type="button" onClick={() => setVisibilityOpen(false)}>
+              Done
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {loading ? (
         <p className="text-sm text-muted-foreground">Loading…</p>
@@ -254,7 +354,9 @@ export function AppsPage() {
           <CardContent className="py-10 text-center text-sm text-muted-foreground">
             {filter === 'hidden'
               ? 'No hidden services. Hide one from the edit dialog.'
-              : 'No services match this filter.'}
+              : hiddenByVisibilityCount > 0 && filter === 'all'
+                ? 'No services match. Some may be hidden by Display filters — open Display to show excluded or other types.'
+                : 'No services match this filter.'}
           </CardContent>
         </Card>
       ) : (
@@ -396,6 +498,28 @@ function formatForward(route: RouteInfo): string | null {
   if (host && port) return `${scheme}://${host}:${port}`
   if (host) return `${scheme}://${host}`
   return `${scheme}://?:${port}`
+}
+
+function VisibilityRow({
+  label,
+  description,
+  checked,
+  onCheckedChange,
+}: {
+  label: string
+  description: string
+  checked: boolean
+  onCheckedChange: (v: boolean) => void
+}) {
+  return (
+    <div className="flex items-start justify-between gap-4">
+      <div className="space-y-0.5">
+        <Label className="text-sm font-medium">{label}</Label>
+        <p className="text-xs text-muted-foreground">{description}</p>
+      </div>
+      <Switch checked={checked} onCheckedChange={onCheckedChange} className="mt-0.5 shrink-0" />
+    </div>
+  )
 }
 
 function StatCard({ title, value, icon }: { title: string; value: string | number; icon: React.ReactNode }) {

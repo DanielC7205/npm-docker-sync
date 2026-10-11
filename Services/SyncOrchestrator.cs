@@ -192,23 +192,32 @@ public class SyncOrchestrator
 
             if (MatchesNeverBridgeKeywords(containerName, null) && !HasSyncLabels(labels))
             {
-                _logger.LogInformation(
-                    "Skipping container {ContainerName} — matches never-bridge keywords (auto-bridge only; add npm/proxy labels to sync explicitly)",
-                    containerName);
-                if (_containerProxyMap.Keys.Any(k => k.StartsWith($"{containerId}:")) ||
-                    _containerStreamMap.Keys.Any(k => k.StartsWith($"{containerId}:")))
+                var uiOnly = new Dictionary<int, ProxyConfiguration>();
+                await MergeUiRouteConfigsAsync(containerId, containerName, uiOnly, cancellationToken);
+                if (uiOnly.Count == 0)
                 {
-                    await ProcessProxyHosts(containerId, containerName, new Dictionary<int, ProxyConfiguration>(), cancellationToken);
-                    await ProcessStreams(containerId, containerName, new Dictionary<int, StreamConfiguration>(), cancellationToken);
-                    _containerLabelHashes.TryRemove(containerId, out _);
-                    _lastProxyConfigs.TryRemove(containerId, out _);
+                    _logger.LogInformation(
+                        "Skipping container {ContainerName} — matches never-bridge keywords (auto-bridge only; add npm/proxy labels or a UI route with domains)",
+                        containerName);
+                    if (_containerProxyMap.Keys.Any(k => k.StartsWith($"{containerId}:")) ||
+                        _containerStreamMap.Keys.Any(k => k.StartsWith($"{containerId}:")))
+                    {
+                        await ProcessProxyHosts(containerId, containerName, new Dictionary<int, ProxyConfiguration>(), cancellationToken);
+                        await ProcessStreams(containerId, containerName, new Dictionary<int, StreamConfiguration>(), cancellationToken);
+                        _containerLabelHashes.TryRemove(containerId, out _);
+                        _lastProxyConfigs.TryRemove(containerId, out _);
+                    }
+                    return;
                 }
-                return;
+
+                _logger.LogInformation(
+                    "Container {ContainerName} is on never-bridge list but has UI route override(s) — syncing {Count} proxy(s)",
+                    containerName, uiOnly.Count);
             }
 
             var proxyConfigs = _labelParser.ParseLabels(labels);
             var streamConfigs = _labelParser.ParseStreamLabels(labels);
-            await MergeManualRouteConfigsAsync(containerId, containerName, proxyConfigs, cancellationToken);
+            await MergeUiRouteConfigsAsync(containerId, containerName, proxyConfigs, cancellationToken);
 
             if (proxyConfigs.Count == 0 && !_labelParser.IsExcluded(labels))
             {
@@ -531,47 +540,43 @@ public class SyncOrchestrator
             var containerName = container.Names.FirstOrDefault()?.TrimStart('/') ?? containerId[..12];
             var labels = container.Labels ?? new Dictionary<string, string>();
 
-            if (_labelParser.IsExcluded(labels))
+            var isProxyExcluded = _labelParser.IsExcluded(labels);
+            var isNeverBridgeBlocked = MatchesNeverBridgeKeywords(containerName, container.Image) && !HasSyncLabels(labels);
+
+            Dictionary<int, ProxyConfiguration> configs;
+
+            if (isProxyExcluded || isNeverBridgeBlocked)
             {
-                routes.Add(new RouteInfo
+                configs = new Dictionary<int, ProxyConfiguration>();
+                await MergeUiRouteConfigsAsync(containerId, containerName, configs, cancellationToken);
+                if (configs.Count == 0)
                 {
-                    ContainerId = containerId,
-                    ContainerName = containerName,
-                    Index = 0,
-                    Name = containerName,
-                    Domains = new List<string>(),
-                    Status = RouteStatus.Excluded,
-                    Category = "Docker",
-                    LabelSource = "godoxy",
-                });
-                continue;
+                    routes.Add(new RouteInfo
+                    {
+                        ContainerId = containerId,
+                        ContainerName = containerName,
+                        Index = 0,
+                        Name = containerName,
+                        Domains = new List<string>(),
+                        Status = RouteStatus.Excluded,
+                        Category = "Docker",
+                        LabelSource = isNeverBridgeBlocked ? "blocked" : "godoxy",
+                    });
+                    continue;
+                }
             }
-
-            if (MatchesNeverBridgeKeywords(containerName, container.Image) && !HasSyncLabels(labels))
+            else
             {
-                routes.Add(new RouteInfo
+                configs = _labelParser.ParseLabels(labels);
+                if (configs.Count == 0)
                 {
-                    ContainerId = containerId,
-                    ContainerName = containerName,
-                    Index = 0,
-                    Name = containerName,
-                    Domains = new List<string>(),
-                    Status = RouteStatus.Excluded,
-                    Category = "Docker",
-                    LabelSource = "blocked",
-                });
-                continue;
-            }
+                    var auto = await TryBuildAutoBridgeConfigAsync(containerId, containerName, labels, cancellationToken);
+                    if (auto != null)
+                        configs[0] = auto;
+                }
 
-            var configs = _labelParser.ParseLabels(labels);
-            if (configs.Count == 0 && !_labelParser.IsExcluded(labels))
-            {
-                var auto = await TryBuildAutoBridgeConfigAsync(containerId, containerName, labels, cancellationToken);
-                if (auto != null)
-                    configs[0] = auto;
+                await MergeUiRouteConfigsAsync(containerId, containerName, configs, cancellationToken);
             }
-
-            await MergeManualRouteConfigsAsync(containerId, containerName, configs, cancellationToken);
 
             if (configs.Count == 0)
                 continue;
@@ -1462,8 +1467,19 @@ public class SyncOrchestrator
     {
         var container = await _dockerClient.Containers.InspectContainerAsync(containerId, cancellationToken);
         var containerName = container.Name.TrimStart('/');
+        var labels = container.Config?.Labels ?? new Dictionary<string, string>();
         var existing = _settings.GetRouteOverride(containerId, containerName, index) ?? new RouteOverride();
         MergeOverride(existing, patch);
+
+        if (existing.Domains is { Count: > 0 })
+            existing.Manual = true;
+
+        if (IsContainerLabelSyncBlockedForOrchestrator(containerName, labels) && !IsUiDrivenRoute(existing))
+        {
+            throw new InvalidOperationException(
+                "This container is excluded from auto-sync. Add at least one domain in the editor (or use Add route) to create a managed proxy.");
+        }
+
         _settings.UpsertRouteOverride(containerId, containerName, index, existing);
 
         // Force re-sync so NPM picks up changes
@@ -1670,7 +1686,14 @@ public class SyncOrchestrator
             RouteOverrideMeta.Attach(request.Meta, overrideData);
     }
 
-    private async Task MergeManualRouteConfigsAsync(
+    private static bool IsUiDrivenRoute(RouteOverride? ov) =>
+        ov != null && (ov.Manual == true || ov.Domains is { Count: > 0 });
+
+    private bool IsContainerLabelSyncBlockedForOrchestrator(string containerName, IDictionary<string, string> labels) =>
+        _labelParser.IsExcluded(labels) ||
+        (MatchesNeverBridgeKeywords(containerName, null) && !HasSyncLabels(labels));
+
+    private async Task MergeUiRouteConfigsAsync(
         string containerId,
         string containerName,
         Dictionary<int, ProxyConfiguration> proxyConfigs,
@@ -1679,11 +1702,11 @@ public class SyncOrchestrator
         foreach (var index in _settings.ListOverrideIndices(containerId, containerName))
         {
             var ov = _settings.GetRouteOverride(containerId, containerName, index);
-            if (ov?.Manual != true || proxyConfigs.ContainsKey(index))
+            if (!IsUiDrivenRoute(ov) || proxyConfigs.ContainsKey(index))
                 continue;
 
             proxyConfigs[index] = await BuildManualProxyConfigurationAsync(
-                containerId, containerName, index, ov, cancellationToken);
+                containerId, containerName, index, ov!, cancellationToken);
         }
     }
 
@@ -1811,7 +1834,7 @@ public class SyncOrchestrator
                     configs[0] = auto;
             }
 
-            await MergeManualRouteConfigsAsync(containerId, containerName, configs, cancellationToken);
+            await MergeUiRouteConfigsAsync(containerId, containerName, configs, cancellationToken);
 
             foreach (var (index, config) in configs)
             {

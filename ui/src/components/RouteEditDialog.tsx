@@ -245,6 +245,11 @@ export function RouteEditDialog({
               <DialogDescription>
                 Edit how this service appears and is proxied. Overrides are stored in SQLite and win over Docker labels.
               </DialogDescription>
+              {route.status === 'Excluded' && (
+                <p className="mt-2 text-sm text-amber-600 dark:text-amber-500">
+                  Excluded from auto-sync — add at least one domain to create a managed NPM proxy for this container.
+                </p>
+              )}
               <p className="mt-1 truncate font-mono text-xs text-muted-foreground">{route.containerName}</p>
             </div>
           </div>
